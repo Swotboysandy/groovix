@@ -1,0 +1,29 @@
+buildscript {
+    ext {
+        buildToolsVersion = "36.0.0"
+        minSdkVersion = 24
+        compileSdkVersion = 36
+        targetSdkVersion = 36
+        ndkVersion = "27.1.12297006"
+        kotlinVersion = "2.1.20"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"
+
+// Libraries that don't name an NDK (e.g. react-native-worklets-core) fall back
+// to AGP's default, which isn't installed; build them all with the app's NDK.
+subprojects {
+    plugins.withId("com.android.library") {
+        android.ndkVersion = rootProject.ext.ndkVersion
+    }
+}

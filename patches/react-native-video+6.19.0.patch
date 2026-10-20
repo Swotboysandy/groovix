@@ -1,0 +1,97 @@
+diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/AudioProcessorHooks.java b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/AudioProcessorHooks.java
+new file mode 100644
+index 0000000..f2e66ca
+--- /dev/null
++++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/AudioProcessorHooks.java
+@@ -0,0 +1,13 @@
++package com.brentvatne.exoplayer;
++
++import androidx.media3.common.audio.AudioProcessor;
++
++/**
++ * Groovix: audio processors the app inserts into every player's audio sink
++ * (its equaliser). Set once from the app before playback starts.
++ */
++public final class AudioProcessorHooks {
++    public static volatile AudioProcessor[] processors = new AudioProcessor[0];
++
++    private AudioProcessorHooks() {}
++}
+diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java
+index e16ac96..206b3f2 100644
+--- a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java
++++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java
+@@ -730,8 +730,21 @@ public class ReactExoplayerView extends FrameLayout implements
+             this.bandwidthMeter = config.getBandwidthMeter();
+         }
+ 
++        // Groovix: route audio through the app's processors (its equaliser).
+         DefaultRenderersFactory renderersFactory =
+-                new DefaultRenderersFactory(getContext())
++                new DefaultRenderersFactory(getContext()) {
++                    @Override
++                    protected androidx.media3.exoplayer.audio.AudioSink buildAudioSink(
++                            android.content.Context context,
++                            boolean enableFloatOutput,
++                            boolean enableAudioTrackPlaybackParams) {
++                        return new androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context)
++                                .setEnableFloatOutput(enableFloatOutput)
++                                .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
++                                .setAudioProcessors(AudioProcessorHooks.processors)
++                                .build();
++                    }
++                }
+                         .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
+                         .setEnableDecoderFallback(true)
+                         .forceEnableMediaCodecAsynchronousQueueing();
+diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
+index 4760ea5..74f1ce9 100644
+--- a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
++++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
+@@ -138,10 +138,45 @@ class VideoPlaybackService : MediaSessionService() {
+          * On Android 12 and bellow we need to add controls manually
+          */
+         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++            val playerId = session.player.hashCode()
++            fun actionIntent(action: COMMAND, requestCode: Int) = PendingIntent.getService(
++                this,
++                playerId * 10 + requestCode,
++                Intent(this, VideoPlaybackService::class.java).apply {
++                    putExtra("PLAYER_ID", playerId)
++                    putExtra("ACTION", action.stringValue)
++                },
++                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
++            )
++
+             NotificationCompat.Builder(this, NOTIFICATION_CHANEL_ID)
++                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                 .setSmallIcon(androidx.media3.session.R.drawable.media3_icon_circular_play)
+-                .setStyle(MediaStyleNotificationHelper.MediaStyle(session))
++                .addAction(
++                    androidx.media3.session.R.drawable.media3_icon_rewind,
++                    "Seek Backward",
++                    actionIntent(COMMAND.SEEK_BACKWARD, 0)
++                )
++                .addAction(
++                    if (session.player.isPlaying) {
++                        androidx.media3.session.R.drawable.media3_icon_pause
++                    } else {
++                        androidx.media3.session.R.drawable.media3_icon_play
++                    },
++                    "Toggle Play",
++                    actionIntent(COMMAND.TOGGLE_PLAY, 1)
++                )
++                .addAction(
++                    androidx.media3.session.R.drawable.media3_icon_fast_forward,
++                    "Seek Forward",
++                    actionIntent(COMMAND.SEEK_FORWARD, 2)
++                )
++                .setStyle(MediaStyleNotificationHelper.MediaStyle(session).setShowActionsInCompactView(0, 1, 2))
++                .setContentTitle(session.player.mediaMetadata.title)
++                .setContentText(session.player.mediaMetadata.description ?: session.player.mediaMetadata.artist)
++                .setLargeIcon(session.player.mediaMetadata.artworkUri?.let { session.bitmapLoader.loadBitmap(it).get() })
+                 .setContentIntent(PendingIntent.getActivity(this, 0, returnToPlayer, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
++                .setOngoing(true)
+                 .build()
+         } else {
+             val playerId = session.player.hashCode()
