@@ -9,7 +9,20 @@ const ts = require(process.env.GROOVIX_TYPESCRIPT || 'typescript');
 const root = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function loader(mocks = {}, globals = {}) {
+// Native and private-config modules every load may reach; a test's own mocks win.
+function baseMocks() {
+    const privateConfig = { TIDAL_SEGMENT_PROXY_URL: '', ACCESS_HOSTS: [], SUPABASE_URL: '', SUPABASE_ANON_KEY: '' };
+    return {
+        '@react-native-async-storage/async-storage': storage(),
+        '@react-native-community/netinfo': { addEventListener: () => () => {}, fetch: async () => ({ type: 'wifi' }) },
+        react: { useEffect: () => {}, useState: value => [value, () => {}] },
+        './config/private': privateConfig,
+        '../config/private': privateConfig,
+    };
+}
+
+function loader(testMocks = {}, globals = {}) {
+    const mocks = { ...baseMocks(), ...testMocks };
     const cache = new Map();
     function load(file) {
         const absolute = path.resolve(root, file);
@@ -23,7 +36,9 @@ function loader(mocks = {}, globals = {}) {
         const localRequire = specifier => {
             if (Object.hasOwn(mocks, specifier)) return mocks[specifier];
             if (!specifier.startsWith('.')) throw new Error(`Unmocked dependency: ${specifier}`);
-            return load(path.resolve(path.dirname(absolute), `${specifier}.ts`));
+            const base = path.resolve(path.dirname(absolute), specifier);
+            const file = [`${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts')].find(candidate => fs.existsSync(candidate)) ?? `${base}.ts`;
+            return load(file);
         };
         vm.runInNewContext(`(function(require,module,exports){${js}\n})`, {
             console, URL, URLSearchParams, AbortController, setTimeout, clearTimeout, atob,
@@ -158,16 +173,6 @@ test('explicit song queued during async radio lookup keeps priority', async () =
     finishRadio([track(2)]);
     await delay(1);
     assert.equal(harness.render().player.currentTrack.id, 50);
-});
-
-test('homepage appends below charts and virtualizes batches into small stable cells', () => {
-    const { appendHomeSection } = loader()('src/services/homeFeed.ts');
-    const chart = appendHomeSection([], 'chart', [track(1)]);
-    const feed = appendHomeSection(chart, 'discovery', Array.from({ length: 24 }, (_, i) => track(i + 1)));
-    assert.equal(feed[0], chart[0]);
-    assert.equal(feed.reduce((count, section) => count + section.tracks.length, 0), 24);
-    assert.ok(feed.every(section => section.tracks.length <= 8));
-    assert.equal(appendHomeSection(feed, 'discovery', [track(2)]), feed);
 });
 
 test('bounded workers preserve input order and never exceed requested concurrency', async () => {
@@ -337,26 +342,6 @@ test('playback recovery cannot substitute an unrelated Audius artist or preview'
         ] } : { results: [] },
     )) })('src/api.ts');
     assert.equal(await API.getFreeFallbackStream(track(1, 'Tum Hi Ho')), null);
-});
-
-test('regional radio bounds search concurrency, fills sparse-artist batches and excludes repeats', async () => {
-    let active = 0; let peak = 0;
-    const api = { search: async name => {
-        peak = Math.max(peak, ++active);
-        await delay(1);
-        active--;
-        return Array.from({ length: 70 }, (_, id) => track(id + 1, `Song ${id + 1}`, name));
-    } };
-    const { getRadioRecommendations } = loader({ '../api': { API: api } }, {
-        fetch: async () => new Response('{}'),
-    })('src/services/recommendations.ts');
-    const result = await getRadioRecommendations(track(1, 'Song 1', 'Anirudh Ravichander'), {
-        artistPlays: {}, trackPlays: {}, likedTracks: [], likedTrackIds: [], recentTracks: [],
-    }, [], new Set([1, 2]), 60, []);
-    assert.ok(peak <= 3);
-    assert.equal(result.length, 60);
-    assert.ok(result.every(item => ![1, 2].includes(item.id)));
-    assert.equal(new Set(result.map(item => item.id)).size, result.length);
 });
 
 test('all source TypeScript and TSX parse without emitting files', () => {

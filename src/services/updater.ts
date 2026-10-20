@@ -4,7 +4,7 @@ import RNFS from 'react-native-fs';
 
 // Current app version. MUST match android/app/build.gradle versionName.
 // The updater compares this against the latest GitHub release tag.
-export const APP_VERSION = '1.0.25';
+export const APP_VERSION = '1.0.26';
 
 // GitHub repo that hosts release APKs.
 const REPO = 'Swotboysandy/groovix_release';

@@ -6,7 +6,7 @@
     "android": "react-native run-android",
     "ios": "react-native run-ios",
     "lint": "eslint .",
-    "postinstall": "patch-package",
+    "postinstall": "patch-package && node scripts/ensure-private-config.cjs",
     "start": "react-native start",
     "test": "jest",
     "test:music": "node --test scripts/music-regression.test.cjs"
