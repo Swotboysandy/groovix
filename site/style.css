@@ -12,3 +12,6 @@ nav a:hover { color: var(--fg); }
 .lead { font-size: 20px; color: var(--fg); }
 .pill { display: inline-block; margin-top: 20px; padding: 12px 22px; border-radius: 999px; background: var(--fg); color: var(--bg); font-weight: 600; text-decoration: none; }
 footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
+.note { margin-top: 28px; padding: 16px 18px; border: 1px solid var(--accent); border-left-width: 4px; border-radius: 12px; background: rgba(250,45,72,0.08); }
+.note strong { color: var(--fg); }
+.note p { margin: 6px 0 0; }

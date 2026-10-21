@@ -65,6 +65,9 @@ No ads. No account required. Your listening history stays on your phone.
 
 Grab the latest APK from the **[Releases page](https://github.com/Swotboysandy/groovix_release/releases/latest)** and install it on any Android phone (Android 7.0+). Groovix updates itself in-app when a new release is published.
 
+> [!IMPORTANT]
+> **Get free access for life:** after installing, send me a quick DM on Instagram **[@suedoo.tech](https://www.instagram.com/suedoo.tech/)** to let me know. I'll open the music for you, free for life.
+
 ## Build from source
 
 **Requirements:** Node.js 20+, JDK 17, Android SDK (NDK 27.1), an Android device or emulator.
