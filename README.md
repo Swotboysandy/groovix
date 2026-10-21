@@ -6,6 +6,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-Android-3DDC84?logo=android&logoColor=white)](https://github.com/Swotboysandy/groovix_release/releases)
 [![React Native](https://img.shields.io/badge/React%20Native-0.84-61DAFB?logo=react&logoColor=black)](https://reactnative.dev)
+[![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/Swotboysandy/groovix_release?label=download)](https://github.com/Swotboysandy/groovix_release/releases/latest)
 
 [Download APK](https://github.com/Swotboysandy/groovix_release/releases/latest) · [Website](https://groovix.pracandy.com) · [Privacy](https://groovix.pracandy.com/privacy) · [Terms](https://groovix.pracandy.com/terms)
@@ -93,6 +94,10 @@ Groovix stores your preferences, history and downloads **only on your device**. 
 ## Contributing
 
 Issues and pull requests are welcome. Please open an issue first for larger changes so we can talk about the approach.
+
+## License
+
+Groovix is free software released under the [GNU General Public License v3.0](LICENSE). You can use, study, share and change it; anything you distribute that's based on it must stay open source under the same license.
 
 ## Disclaimer
 
