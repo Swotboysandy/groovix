@@ -76,8 +76,10 @@ export default function HomeScreen({ navigation }: any) {
     const continuation = useRef<string | null>(null);
 
     // Shelves arrive one at a time; a title already on the page is not added twice.
+    const publishedCount = useRef(0);
     const publish = useCallback((gen: number, shelf: Shelf | null) => {
         if (!shelf || gen !== generation.current) return;
+        publishedCount.current += 1;
         setShelves(current => current.some(item => item.title.toLocaleLowerCase() === shelf.title.toLocaleLowerCase()) ? current : [...current, shelf]);
     }, []);
 
@@ -85,6 +87,7 @@ export default function HomeScreen({ navigation }: any) {
     const loadHome = useCallback(async () => {
         const gen = ++generation.current;
         continuation.current = null;
+        publishedCount.current = 0;
         setShelves([]);
         setFailed(false);
         setPending(1 + HOME_SUPPLEMENT_BROWSE_IDS.length);
@@ -108,9 +111,24 @@ export default function HomeScreen({ navigation }: any) {
             const tracks = uniqueTracks(fromArtists.flat());
             if (tracks.length >= MIN_SHELF_ITEMS) publish(gen, { key: 'yt-subs', title: 'From your subscriptions', tracks });
         }).catch(() => {});
-        const results = await Promise.allSettled([homePage.finally(settle), ...supplements, personal]);
+        await Promise.allSettled([homePage.finally(settle), ...supplements, personal]);
         if (gen !== generation.current) return;
-        if (results.every(result => result.status === 'rejected')) setFailed(true);
+        // YouTube Music gave nothing playable (blocked on this network, or no
+        // matches): fill Home from the catalogue's own charts and searches.
+        if (publishedCount.current === 0) {
+            const fallback = await Promise.allSettled([
+                API.getGlobalChart(SHELF_ITEMS, 0),
+                API.search('top hits'),
+                API.search('new music'),
+            ]);
+            if (gen !== generation.current) return;
+            const titles = ['Top charts', 'Popular right now', 'New music'];
+            fallback.forEach((result, index) => {
+                const tracks = result.status === 'fulfilled' ? uniqueTracks(result.value).slice(0, SHELF_ITEMS) : [];
+                if (tracks.length >= MIN_SHELF_ITEMS) publish(gen, { key: `fallback-${index}`, title: titles[index], tracks });
+            });
+            if (publishedCount.current === 0) setFailed(true);
+        }
         setRefreshing(false);
     }, [publish]);
 

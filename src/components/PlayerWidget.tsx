@@ -224,15 +224,13 @@ const QUALITY_OPTIONS: { label: string; desc: string; value: StreamQuality }[] =
     { label: '96kbps AAC', desc: 'Data saver AAC streaming', value: 'LOW' },
 ];
 
-const { width, height } = Dimensions.get('window');
+const { width, height: WINDOW_HEIGHT } = Dimensions.get('window');
 // Floating tab bar pill (~72dp) + its 14dp bottom inset + 10dp gap above it.
 const TAB_BAR_HEIGHT = 96;
 const MINI_HEIGHT = 60;
 // The player owns only the area above the persistent tab bar. Keeping the
 // expanded and minimized states in the same fixed viewport avoids the old
 // mid-drag height switch that could leave a large, empty blurred panel visible.
-const PLAYER_HEIGHT = height - TAB_BAR_HEIGHT;
-const MINIMIZED_Y = PLAYER_HEIGHT - MINI_HEIGHT;
 const FULL_ARTWORK_SIZE = width;
 const MINI_ARTWORK_SIZE = 40;
 
@@ -286,6 +284,8 @@ export default function PlayerWidget() {
     const [showQualityModal, setShowQualityModal] = useState(false);
     const [showQueue, setShowQueue] = useState(false);
     const [playerExpanded, setPlayerExpanded] = useState(false);
+    const playerExpandedRef = useRef(false);
+    playerExpandedRef.current = playerExpanded;
     const [scrubTime, setScrubTime] = useState<number | null>(null);
     const displayedPlaying = isPlaying;
     const displayedTime = scrubTime ?? currentTime;
@@ -296,6 +296,12 @@ export default function PlayerWidget() {
     }, [seek]);
 
     const insets = useSafeAreaInsets();
+    // The space the app actually gets. On phones with on-screen nav buttons the
+    // reported window height can include the button bar, which would park the
+    // mini player on top of the tab bar; measuring the container avoids that.
+    const [height, setHeight] = useState(WINDOW_HEIGHT);
+    const PLAYER_HEIGHT = height - TAB_BAR_HEIGHT;
+    const MINIMIZED_Y = PLAYER_HEIGHT - MINI_HEIGHT;
     const settings = useAppSettings();
     // Full-screen cover art runs the art to the edges from the very top; off, it is
     // a square sleeve inside the 30dp gutter with an 8dp corner.
@@ -317,6 +323,10 @@ export default function PlayerWidget() {
     const CONTROLS_MARGIN_TOP = (FULL_INFO_Y + TEXT_BLOCK_HEIGHT) - (insets.top + HEADER_FLOW_HEIGHT);
 
     const dragY = useSharedValue(MINIMIZED_Y);
+    // When the measured height settles, keep a minimised player sitting on its new line.
+    useEffect(() => {
+        if (!playerExpandedRef.current) dragY.value = MINIMIZED_Y;
+    }, [MINIMIZED_Y, dragY]);
     const lyricsTranslateY = useSharedValue(height);
     const lyricsContext = useSharedValue(0);
     const lyricsIsDragging = useSharedValue(0);
@@ -772,11 +782,18 @@ export default function PlayerWidget() {
     if (!currentTrack) return null;
 
     return (
-        <View style={styles.absoluteContainer} pointerEvents="box-none">
+        <View
+            style={styles.absoluteContainer}
+            pointerEvents="box-none"
+            onLayout={event => {
+                const measured = Math.round(event.nativeEvent.layout.height);
+                if (measured > 0 && Math.abs(measured - height) > 1) setHeight(measured);
+            }}
+        >
             {settings.hideStatusBarInPlayer && playerExpanded ? <StatusBar hidden animated /> : null}
             <Animated.View style={[styles.playerViewport, viewportStyle]} pointerEvents="box-none">
                 <GestureDetector gesture={mainGesture}>
-                    <Animated.View style={[styles.widgetRoot, widgetRootStyle]}>
+                    <Animated.View style={[styles.widgetRoot, { height }, widgetRootStyle]}>
 
                     {/* BACKGROUNDS */}
                     <Animated.View style={[StyleSheet.absoluteFill, miniBgStyle]}>
@@ -1101,7 +1118,6 @@ const styles = StyleSheet.create({
     },
     widgetRoot: {
         position: 'absolute', top: 0, left: 0, right: 0,
-        height,
         backgroundColor: 'transparent', overflow: 'hidden',
         borderTopLeftRadius: 16, borderTopRightRadius: 16,
     },

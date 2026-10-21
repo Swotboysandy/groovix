@@ -1,4 +1,4 @@
-import { TIDAL_SEGMENT_PROXY_URL } from './config/private';
+import { HIFI_API_URL, TIDAL_SEGMENT_PROXY_URL } from './config/private';
 import { appSettings, loadAppSettings } from './store/appSettings';
 import type { Album, Artist, CatalogSearchResult, Playlist, Track } from './types';
 import CryptoJS from 'crypto-js';
@@ -1036,7 +1036,62 @@ export const API = {
         // now sits behind a Turnstile gate and 403s. Any failure falls through to
         // the legacy path below.
         const requested = normalizeAppQuality(quality);
+        // A hifi-api host: /track returns either a direct URL or a DASH manifest.
+        const viaHifi = async (base: string): Promise<StreamData | null> => {
+            try {
+            const res = await fetchWithTimeout(`${base}/track/?id=${trackId}&quality=${requested}`);
+                if (!res.ok) return null;
+                const data = await res.json();
+                const container = data?.data ?? data;
+    
+                const reportedQuality = typeof container.audioQuality === 'string'
+                    ? normalizeAppQuality(container.audioQuality)
+                    : (typeof container.quality === 'string' ? normalizeAppQuality(container.quality) : undefined);
+                if (container.OriginalTrackUrl) return { url: container.OriginalTrackUrl, isDash: false, resolvedQuality: reportedQuality };
+                if (container.originalTrackUrl) return { url: container.originalTrackUrl, isDash: false, resolvedQuality: reportedQuality };
+    
+                const manifest = container.manifest;
+                if (!manifest) return null;
+    
+                const decoded = atobSafe(manifest);
+                const mimeType = container.manifestMimeType || '';
+    
+                if (mimeType === 'application/dash+xml' || decoded.includes('<MPD')) {
+                    {
+                    // The Representation id reads like "FLAC,44100,16"; codecs and rate are attributes.
+                    const rep = decoded.match(/<Representation[^>]*>/)?.[0] ?? '';
+                    const [idCodec, idRate, idDepth] = (rep.match(/id="([^"]+)"/)?.[1] ?? '').split(',');
+                    const format = {
+                        codec: (rep.match(/codecs="([^"]+)"/)?.[1] ?? idCodec ?? null)?.toUpperCase() ?? null,
+                        sampleRate: Number(rep.match(/audioSamplingRate="(\d+)"/)?.[1] ?? idRate) || null,
+                        bitDepth: Number(idDepth) || null,
+                        bitrate: Number(rep.match(/bandwidth="(\d+)"/)?.[1]) || null,
+                    };
+                    return { url: '', isDash: true, dashXml: decoded, format, resolvedQuality: reportedQuality };
+                }
+                }
+    
+                try {
+                    const parsed = JSON.parse(decoded);
+                    if (parsed.urls && parsed.urls.length > 0) return { url: parsed.urls[0], isDash: false, resolvedQuality: reportedQuality };
+                } catch { }
+    
+                const baseUrlMatch = decoded.match(/<BaseURL[^>]*>([^<]+)<\/BaseURL>/i);
+                if (baseUrlMatch?.[1]) return { url: baseUrlMatch[1].trim(), isDash: false, resolvedQuality: reportedQuality };
+    
+                const urls = decoded.match(/https?:\/\/[^\s<"]+/g);
+                if (urls && urls.length > 0) {
+                    const valid = urls.filter((u: string) => !u.includes('w3.org'));
+                    if (valid.length > 0) return { url: valid[0].replace(/&amp;/g, '&'), isDash: false, resolvedQuality: reportedQuality };
+                }
+    
+                return null;
+            } catch { return null; }
+        };
         const viaTidal = async (): Promise<StreamData | null> => {
+            // Your hifi-api server first; Rhythmax after it.
+            const hifi = HIFI_API_URL ? await viaHifi(HIFI_API_URL) : null;
+            if (hifi) return hifi;
             for (const candidate of RHYTHMAX_FALLBACKS[requested]) {
                 try {
                     const wanted = RHYTHMAX_QUALITY[candidate];
@@ -1067,42 +1122,10 @@ export const API = {
             if (found) return found;
         }
 
-        const res = await fetchWithTimeout(`${MONOCHROME_URL}/track/?id=${trackId}&quality=${requested}`);
-        if (!res.ok) throw new Error('Stream URL fetch failed');
-        const data = await res.json();
-        const container = data?.data ?? data;
-
-        const reportedQuality = typeof container.audioQuality === 'string'
-            ? normalizeAppQuality(container.audioQuality)
-            : (typeof container.quality === 'string' ? normalizeAppQuality(container.quality) : undefined);
-        if (container.OriginalTrackUrl) return { url: container.OriginalTrackUrl, isDash: false, resolvedQuality: reportedQuality };
-        if (container.originalTrackUrl) return { url: container.originalTrackUrl, isDash: false, resolvedQuality: reportedQuality };
-
-        const manifest = container.manifest;
-        if (!manifest) throw new Error('No stream URL or manifest found');
-
-        const decoded = atobSafe(manifest);
-        const mimeType = container.manifestMimeType || '';
-
-        if (mimeType === 'application/dash+xml' || decoded.includes('<MPD')) {
-            return { url: '', isDash: true, dashXml: decoded, resolvedQuality: reportedQuality };
-        }
-
-        try {
-            const parsed = JSON.parse(decoded);
-            if (parsed.urls && parsed.urls.length > 0) return { url: parsed.urls[0], isDash: false, resolvedQuality: reportedQuality };
-        } catch { }
-
-        const baseUrlMatch = decoded.match(/<BaseURL[^>]*>([^<]+)<\/BaseURL>/i);
-        if (baseUrlMatch?.[1]) return { url: baseUrlMatch[1].trim(), isDash: false, resolvedQuality: reportedQuality };
-
-        const urls = decoded.match(/https?:\/\/[^\s<"]+/g);
-        if (urls && urls.length > 0) {
-            const valid = urls.filter((u: string) => !u.includes('w3.org'));
-            if (valid.length > 0) return { url: valid[0].replace(/&amp;/g, '&'), isDash: false, resolvedQuality: reportedQuality };
-        }
-
-        throw new Error('Could not parse stream URL');
+        // Last resort: the catalogue host's own stream endpoint.
+        const last = await viaHifi(MONOCHROME_URL);
+        if (last) return last;
+        throw new Error('No playable stream found');
     },
 
     async getFreeFallbackStream(track: Track): Promise<StreamData | null> {

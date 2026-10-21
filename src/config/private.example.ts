@@ -6,3 +6,5 @@ export const ACCESS_HOSTS: string[] = [];
 // Supabase project for Listen Together; leave empty to turn Jam off.
 export const SUPABASE_URL = '';
 export const SUPABASE_ANON_KEY = '';
+// Your hifi-api server for lossless TIDAL streams; leave empty to skip it.
+export const HIFI_API_URL = '';

@@ -11,7 +11,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Native and private-config modules every load may reach; a test's own mocks win.
 function baseMocks() {
-    const privateConfig = { TIDAL_SEGMENT_PROXY_URL: '', ACCESS_HOSTS: [], SUPABASE_URL: '', SUPABASE_ANON_KEY: '' };
+    const privateConfig = { HIFI_API_URL: '', TIDAL_SEGMENT_PROXY_URL: '', ACCESS_HOSTS: [], SUPABASE_URL: '', SUPABASE_ANON_KEY: '' };
     return {
         '@react-native-async-storage/async-storage': storage(),
         '@react-native-community/netinfo': { addEventListener: () => () => {}, fetch: async () => ({ type: 'wifi' }) },
