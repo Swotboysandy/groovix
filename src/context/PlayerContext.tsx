@@ -684,8 +684,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         const session = playSessionRef.current;
         try {
             const candidates = [...autoQueueRef.current].reverse().filter(track => !usedSeedsRef.current.has(track.id));
-            const seeds = candidates.length ? candidates.slice(0, 3) : [currentTrackRef.current];
+            // Keep pulling stations until at least 25 songs are lined up; one seed
+            // can return only a couple of new songs once duplicates are dropped.
+            const seeds = [...candidates.slice(0, 6), currentTrackRef.current, ...queueRef.current.slice(-2)]
+                .filter((seed, i, all) => all.findIndex(other => other.id === seed.id) === i);
             for (const seed of seeds) {
+                if (autoQueueRef.current.length >= 25) return;
                 usedSeedsRef.current.add(seed.id);
                 const exclude = new Set([seed.id, currentTrackRef.current?.id ?? 0, ...recentIdsRef.current, ...queueRef.current.map(track => track.id),
                     ...autoQueueRef.current.map(track => track.id), ...sessionSeenRef.current]);
@@ -695,7 +699,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                 items.forEach(track => sessionSeenRef.current.add(track.id));
                 autoQueueRef.current = appendRadioTracks(autoQueueRef.current, items, new Set([...recentIdsRef.current, ...queueRef.current.map(track => track.id)]));
                 syncUpNext();
-                return;
             }
         } catch { /* try again on the next scroll */ } finally {
             moreInFlightRef.current = false;

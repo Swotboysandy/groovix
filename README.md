@@ -17,14 +17,23 @@
 
 ## What is Groovix?
 
-Groovix is an open-source **music streaming player for Android**. Search any song, album or artist, play it in high quality, read **time-synced lyrics** as the track plays, and keep the music going with an **endless AutoPlay radio** tuned to what you like. Sign in with Google to bring your **YouTube playlists, likes and subscriptions** into the app, or start a **Listen Together** session so friends hear the same song at the same moment.
+Groovix is an open-source **music streaming player for Android**. Search any song, album or artist, play it in up to **Hi-Res 24-bit FLAC**, read **time-synced lyrics** as the track plays, and keep the music going with an **endless AutoPlay radio** tuned to what you like. Sign in with Google to bring your **YouTube playlists, likes and subscriptions** into the app, or start a **Listen Together** session so friends hear the same song at the same moment.
 
 No ads. No account required. Your listening history stays on your phone.
 
 ## Features
 
 ### 🎵 Streaming & playback
-- **High-quality audio** — lossless where available, with AAC 320 kbps fallback; choose separate quality for **Wi-Fi and mobile data**.
+- **Hi-Res lossless FLAC streaming** — up to **24-bit / 192 kHz FLAC**, the highest quality available for each song, with automatic fallback when a track isn't offered in Hi-Res.
+- **Four quality levels**, set separately for **Wi-Fi and mobile data**:
+
+  | Quality | Format |
+  |---|---|
+  | Hi-Res | 24-bit FLAC, up to 192 kHz |
+  | CD Lossless | 16-bit / 44.1 kHz FLAC |
+  | High | 320 kbps AAC |
+  | Data saver | 96 kbps AAC |
+- **Live format label** — the player shows what is actually playing (24-bit FLAC, FLAC, AAC), and *Stats for nerds* shows the bit depth and sample rate.
 - **Configurable sources** — pick which audio sources are used and in what order.
 - **Built-in equalizer** — Dynamic tone pad or a 7-band manual EQ, plus left/right balance.
 - **Offline downloads** with their own quality setting and a Wi-Fi-only option.
@@ -93,7 +102,11 @@ Groovix stores your preferences, history and downloads **only on your device**. 
 
 ## Contributing
 
-Issues and pull requests are welcome. Please open an issue first for larger changes so we can talk about the approach.
+**Contributions and bug reports are open to everyone.**
+
+- **Found a bug?** [Open an issue](https://github.com/Swotboysandy/groovix/issues/new) with the steps to reproduce it, your phone model, Android version and Groovix version.
+- **Have a fix or a feature?** Fork the repo, make your change on a branch and open a pull request. I review every pull request and merge the ones that fit.
+- For larger changes, open an issue first so we can talk about the approach.
 
 ## License
 
@@ -109,6 +122,6 @@ Groovix is a player client. Music, artwork and lyrics belong to their respective
 
 **Groovix** — free music streaming, synced lyrics and Listen Together for Android.
 
-<sub>Keywords: free music app android, music player, music streaming app, synced lyrics app, lossless music player, listen together, react native music player, ad-free music app, open source music player</sub>
+<sub>Keywords: free music app android, music player, music streaming app, synced lyrics app, lossless music player, FLAC music player, hi-res audio streaming, 24-bit FLAC, FLAC streaming app, lossless audio android, hi-res music player android, high quality music streaming, 192 kHz audio, CD quality music, 320 kbps music app, audiophile music player, listen together, react native music player, ad-free music app, open source music player</sub>
 
 </div>

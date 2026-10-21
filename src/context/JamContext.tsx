@@ -442,22 +442,50 @@ export function JamProvider({ children }: { children: React.ReactNode }) {
         pushState();
     }, [isPlaying, currentTrack, pushState]);
 
-    // ── Followers: detect drift/pause and surface a "Sync" button (no forced seek) ──
+    // ── Host: a seek (scrubbing the progress bar) is published straight away ──
+    useEffect(() => {
+        if (!slugRef.current || !isHostRef.current || !isPlaying || isBuffering) return;
+        const pb = me.current.playback;
+        if (!pb || pb.status !== 'playing' || pb.track.id !== currentTrack?.id) return;
+        const expected = pb.position_ms / 1000 + (Date.now() - pb.ts) / 1000;
+        if (Math.abs(currentTime - expected) < 2) return;
+        me.current = { ...me.current, playback: { ...pb, position_ms: Math.round(currentTime * 1000), ts: Date.now() } };
+        pushState();
+    }, [currentTime, isPlaying, isBuffering, currentTrack, pushState]);
+
+    // ── Followers: stay on the host's song, play state and position automatically ──
+    const lastAutoSyncRef = useRef(0);
     useEffect(() => {
         const id = setInterval(() => {
             let b = false;
             if (!isHostRef.current && slugRef.current) {
                 const np = nowPlayingRef.current;
+                const now = Date.now();
+                // Give the player time to load/seek before acting again.
+                const canAct = now - lastAutoSyncRef.current > 5000;
                 if (np && np.playing) {
-                    if (currentTrackRef.current?.id !== np.track.id) b = true;
-                    else if (!isPlayingRef.current) b = true;
-                    else {
-                        const hp = hostPosRef.current;
-                        if (hp && hp.trackId === currentTrackRef.current?.id && !isBufferingRef.current) {
-                            const expected = hp.pos + (Date.now() - hp.at) / 1000;
-                            if (Math.abs(currentTimeRef.current - expected) > BEHIND_S) b = true;
+                    const hp = hostPosRef.current;
+                    const expected = hp && hp.trackId === np.track.id ? hp.pos + (now - hp.at) / 1000 : 0;
+                    if (currentTrackRef.current?.id !== np.track.id) {
+                        b = true;
+                        if (canAct) {
+                            lastAutoSyncRef.current = now;
+                            lastAdoptedIdRef.current = np.track.id;
+                            playTrackRef.current(np.track, expected > 2 ? expected : 0);
+                        }
+                    } else if (!isBufferingRef.current) {
+                        if (!isPlayingRef.current) {
+                            b = true;
+                            if (canAct) { lastAutoSyncRef.current = now; togglePlayPauseRef.current(); }
+                        } else if (hp && Math.abs(currentTimeRef.current - expected) > BEHIND_S) {
+                            b = true;
+                            if (canAct) { lastAutoSyncRef.current = now; seekRef.current(expected); }
                         }
                     }
+                } else if (np && !np.playing && currentTrackRef.current?.id === np.track.id && isPlayingRef.current && canAct) {
+                    // Host paused: pause here too.
+                    lastAutoSyncRef.current = now;
+                    togglePlayPauseRef.current();
                 }
             }
             if (b !== behindRef.current) { behindRef.current = b; setBehind(b); }
@@ -538,7 +566,7 @@ export function JamProvider({ children }: { children: React.ReactNode }) {
 
     const addLikedToQueue = useCallback((tracks: Track[]) => {
         if (!isHostRef.current || tracks.length === 0) return;
-        const existingTrackIds = new Set(me.current.adds.map(item => item.track.id));
+        const existingTrackIds = new Set([...me.current.adds.map(item => item.track.id), ...queueRef.current.map(item => item.track.id)]);
         const entries = tracks
             .filter(track => !existingTrackIds.has(track.id))
             .slice(0, MAX_ADDS)

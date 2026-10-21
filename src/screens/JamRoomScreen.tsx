@@ -28,7 +28,7 @@ import { ACCENT_RED, GX_DARK, GX_LIGHT, GX_TYPE, PAGE_GUTTER, PLAYING_ACCENT } f
 // player. This includes queue rows, votes, sync, chat, search, and the FAB.
 const TouchableOpacity = TouchableScale;
 
-const ACCENT = '#7c5cfc';
+const ACCENT = ACCENT_RED;
 const ACCENT2 = '#fa2d48';
 
 const SEARCH_FILTERS = [
@@ -152,6 +152,7 @@ export default function JamRoomScreen() {
     const [resultFilter, setResultFilter] = useState<ResultFilter>('songs');
     const [addedTrackIds, setAddedTrackIds] = useState<Set<number>>(new Set());
     const searchRequestRef = useRef(0);
+    const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Unread badge: messages seen up to the moment chat is open; stays cleared while open.
     const openChat = useCallback(() => { setShowChat(true); setSeenCount(messages.length); }, [messages.length]);
@@ -266,10 +267,9 @@ export default function JamRoomScreen() {
         setChatInput('');
     };
 
-    const searchTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const handleAdd = (track: Track) => {
-        if (addedTrackIds.has(track.id)) return;
+        if (addedTrackIds.has(track.id) || sortedQueue.some(item => item.track.id === track.id)) return;
         addToQueue(track);
         setAddedTrackIds(previous => new Set(previous).add(track.id));
     };
@@ -321,6 +321,7 @@ export default function JamRoomScreen() {
     }, [commitResults]);
 
     const closeSearch = () => {
+        if (searchTimeout.current) clearTimeout(searchTimeout.current);
         searchRequestRef.current += 1;
         setShowSearch(false);
         setQuery('');
@@ -343,6 +344,7 @@ export default function JamRoomScreen() {
     if (!room) return null;
 
     const playingId = nowPlaying?.track.id;
+    const queuedTrackIds = new Set(sortedQueue.map(item => item.track.id));
     const renderQueueItem = ({ item, index }: { item: JamTrack; index: number }) => (
         <QueueRow
             item={item}
@@ -381,7 +383,7 @@ export default function JamRoomScreen() {
     );
     const badge = (text: string) => <Text style={[GX_TYPE.labelSmall, partyStyles.badge]}>{text.toUpperCase()}</Text>;
     // connection line under the heading.
-    const connection = !isConnected ? 'Reconnecting…' : behind ? 'Out of sync — tap Sync to catch up' : 'In sync with the party';
+    const connection = !isConnected ? 'Reconnecting…' : behind ? 'Catching up with the host…' : 'In sync with the party';
 
     return (
         <View style={[partyStyles.screen, { backgroundColor: bc.background, paddingTop: insets.top }]}>
@@ -418,13 +420,11 @@ export default function JamRoomScreen() {
                                     <Ionicons name="play-forward" size={24} color={bc.onBackground} />
                                 </TouchableOpacity>
                             </View>
-                        ) : behind ? (
+                        ) : (
                             <TouchableOpacity onPress={syncToRoom} style={[partyStyles.syncPill, { backgroundColor: bc.primary }]} accessibilityRole="button">
                                 <Ionicons name="sync" size={14} color={bc.onPrimary} />
-                                <Text style={[GX_TYPE.labelMedium, { color: bc.onPrimary }]}>Sync</Text>
+                                <Text style={[GX_TYPE.labelMedium, { color: bc.onPrimary }]}>{behind ? 'Sync' : 'Synced'}</Text>
                             </TouchableOpacity>
-                        ) : (
-                            <View style={partyStyles.live}><View style={partyStyles.liveDot} /><Text style={[GX_TYPE.labelSmall, { color: bc.onSurfaceVariant }]}>LIVE</Text></View>
                         )}
                     </View>
                 ) : isHost && sortedQueue.length > 0
@@ -432,7 +432,7 @@ export default function JamRoomScreen() {
                     : row('musical-notes', 'Nothing playing yet', null, null))}
 
                 {/* Members */}
-                {group(`Listening · ${room.participants.length}`, 'Only the host changes what plays; everyone can add songs and vote.', (
+                {group(`Listening · ${room.participants.length}`, 'Everyone hears what the host plays, pauses or skips to. Anyone can add songs and vote.', (
                     <>
                         {room.participants.map((name, index) => (
                             <View key={name}>
@@ -521,13 +521,13 @@ export default function JamRoomScreen() {
                             onChangeText={onQueryChange}
                         />
                         {query.length > 0 && (
-                            <TouchableOpacity onPress={() => browseFilter('top')}>
+                            <TouchableOpacity onPress={() => { if (searchTimeout.current) clearTimeout(searchTimeout.current); setQuery(''); browseFilter('top'); }}>
                                 <Ionicons name="close-circle" size={18} color={colors.textSecondary} />
                             </TouchableOpacity>
                         )}
                     </View>
 
-                    <View style={styles.resultFilterList}>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.resultFilterScroll} contentContainerStyle={styles.resultFilterList}>
                         {RESULT_FILTERS.filter(filter => isHost || filter.id !== 'liked').map(filter => {
                             const selected = resultFilter === filter.id;
                             return (
@@ -543,7 +543,7 @@ export default function JamRoomScreen() {
                                 </TouchableOpacity>
                             );
                         })}
-                    </View>
+                    </ScrollView>
 
                     {!query.trim() && resultFilter === 'songs' && (
                         <View style={styles.filterList}>
@@ -633,7 +633,7 @@ export default function JamRoomScreen() {
                             }
                             const track = item as Track;
                             const cover = API.getCoverUrl(track.album?.cover, 80);
-                            const added = addedTrackIds.has(track.id);
+                            const added = addedTrackIds.has(track.id) || queuedTrackIds.has(track.id);
                             return (
                                 <TouchableOpacity
                                     style={[styles.resultRow, added && styles.resultRowAdded]}
@@ -947,10 +947,11 @@ const createStyles = (colors: ThemeColors, accent: string, isLight: boolean) => 
     resultTitle: { fontFamily: 'Inter-Medium', fontSize: 14, color: colors.text, marginBottom: 2 },
     resultArtist: { fontFamily: 'Inter-Regular', fontSize: 12, color: colors.textMuted },
     resultRowAdded: { opacity: 0.6 },
-    resultFilterList: { flexDirection: 'row', paddingHorizontal: 16, paddingTop: 6, paddingBottom: 4, gap: 7 },
+    resultFilterScroll: { flexGrow: 0, flexShrink: 0 },
+    resultFilterList: { flexDirection: 'row', paddingHorizontal: 16, paddingTop: 6, paddingBottom: 4, gap: 8 },
     resultFilterChip: {
-        flex: 1, minWidth: 0, minHeight: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
-        paddingHorizontal: 7, borderRadius: 21,
+        minHeight: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+        paddingHorizontal: 16, paddingVertical: 9, borderRadius: 20,
         backgroundColor: colors.surfaceHover, borderWidth: 1, borderColor: colors.border,
     },
     resultFilterChipActive: { backgroundColor: accent, borderColor: accent },
