@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
-    View, Text, Modal, TouchableOpacity, StyleSheet, NativeModules,
+    View, Text, Modal, Pressable, ScrollView, StyleSheet, NativeModules,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Ionicons from 'react-native-vector-icons/Ionicons';
 import { checkForUpdate, downloadAndInstall, type UpdateInfo } from '../services/updater';
 import { useAppDialog } from '../context/DialogContext';
 import { useTheme } from '../context/ThemeContext';
@@ -59,95 +58,94 @@ export default function UpdatePrompt() {
 
     if (!update) return null;
 
+    const dismiss = () => { if (!downloading) setUpdate(null); };
+    const rule = { backgroundColor: colors.text, opacity: 0.14 };
+    const noteLines = (update.notes || '').split('\n')
+        .map(line => line.replace(/\*\*/g, '').trim())
+        .filter(line => line && !/^#*\s*what's new$/i.test(line) && !/^sha-256/i.test(line));
+
     return (
-        <Modal visible transparent animationType="fade" statusBarTranslucent>
-            <View style={styles.backdrop}>
-                <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-                    <View style={[styles.iconWrap, { backgroundColor: colors.surfaceActive }]}>
-                        <Ionicons name="rocket-outline" size={30} color={colors.primary} />
+        <Modal visible transparent animationType="fade" statusBarTranslucent onRequestClose={dismiss}>
+            <Pressable style={styles.backdrop} onPress={dismiss}>
+                <Pressable style={[styles.card, { backgroundColor: colors.surface }]} onPress={() => {}}>
+                    <View style={styles.body}>
+                        <Text style={[styles.title, { color: colors.text }]}>Software Update</Text>
+                        <Text style={[styles.message, { color: colors.text }]}>
+                            {downloading
+                                ? (progress >= 1 ? `Groovix ${update.version} is ready to install.` : `Downloading Groovix ${update.version}…`)
+                                : `Groovix ${update.version} is available to download.`}
+                        </Text>
+
+                        {downloading ? (
+                            <View style={[styles.track, { backgroundColor: 'rgba(128,128,128,0.25)' }]}>
+                                <View style={[styles.fill, { backgroundColor: colors.primary, width: `${Math.round(progress * 100)}%` }]} />
+                            </View>
+                        ) : null}
+
+                        {noteLines.length ? (
+                            <>
+                                <View style={[styles.rule, rule, { marginTop: 12, alignSelf: 'stretch' }]} />
+                                <Text style={[styles.whatsNew, { color: colors.text }]}>What’s new</Text>
+                                <ScrollView style={styles.notes} nestedScrollEnabled>
+                                    {noteLines.map((line, i) => {
+                                        const bullet = /^[-*•]\s+/.test(line);
+                                        return (
+                                            <Text key={i} style={[styles.note, { color: colors.text }, line.startsWith('#') && styles.noteHeading]}>
+                                                {bullet ? `•  ${line.replace(/^[-*•]\s+/, '')}` : line.replace(/^#+\s*/, '')}
+                                            </Text>
+                                        );
+                                    })}
+                                </ScrollView>
+                            </>
+                        ) : null}
                     </View>
 
-                    <Text style={[styles.title, { color: colors.text }]}>Update available</Text>
-                    <Text style={[styles.version, { color: colors.primary }]}>Version {update.version}</Text>
-
-                    {update.notes ? (
-                        <Text style={[styles.notes, { color: colors.textMuted }]} numberOfLines={5}>{update.notes}</Text>
-                    ) : null}
-
+                    <View style={[styles.rule, rule]} />
                     {downloading ? (
-                        <View style={styles.progressWrap}>
-                            <View style={[styles.progressTrack, { backgroundColor: colors.divider }]}>
-                                <View style={[styles.progressFill, { backgroundColor: colors.primary, width: `${Math.round(progress * 100)}%` }]} />
-                            </View>
-                            <Text style={[styles.progressText, { color: colors.textMuted }]}>
-                                {progress >= 1 ? 'Opening installer…' : `Downloading ${Math.round(progress * 100)}%`}
-                            </Text>
-                        </View>
+                        <AlertAction label={progress >= 1 ? 'Opening installer…' : 'Downloading…'} color={colors.primary} disabled />
                     ) : (
-                        <View style={styles.actions}>
-                            <TouchableOpacity
-                                style={[styles.laterBtn, { backgroundColor: colors.surfaceHover, borderColor: colors.border }]}
-                                onPress={() => setUpdate(null)}
-                                activeOpacity={0.7}
-                            >
-                                <Text style={[styles.laterText, { color: colors.text }]}>Later</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                                style={[styles.updateBtn, { backgroundColor: colors.primary }]}
-                                onPress={handleUpdate}
-                                activeOpacity={0.85}
-                            >
-                                <Ionicons name="download-outline" size={18} color={colors.background} />
-                                <Text style={[styles.updateText, { color: colors.background }]}>Update now</Text>
-                            </TouchableOpacity>
-                        </View>
+                        <>
+                            <AlertAction label="Download Now" color={colors.primary} emphasised onPress={handleUpdate} />
+                            <View style={[styles.rule, rule]} />
+                            <AlertAction label="Remind Me Later" color={colors.primary} onPress={dismiss} />
+                        </>
                     )}
-                </View>
-            </View>
+                </Pressable>
+            </Pressable>
         </Modal>
     );
 }
 
+/** Full-width text row; the row washes grey while pressed instead of a ripple. */
+function AlertAction({ label, color, emphasised, disabled, onPress }: {
+    label: string; color: string; emphasised?: boolean; disabled?: boolean; onPress?: () => void;
+}) {
+    return (
+        <Pressable
+            disabled={disabled}
+            onPress={onPress}
+            style={({ pressed }) => [styles.action, pressed && { backgroundColor: 'rgba(128,128,128,0.15)' }]}
+        >
+            <Text style={[styles.actionText, { color, opacity: disabled ? 0.4 : 1 }, emphasised && styles.actionBold]}>{label}</Text>
+        </Pressable>
+    );
+}
+
+// iOS system-alert metrics: 270 wide, 14 corner, 44 tall action rows, hairline rules.
 const styles = StyleSheet.create({
-    backdrop: {
-        flex: 1, backgroundColor: 'rgba(0,0,0,0.7)',
-        alignItems: 'center', justifyContent: 'center', padding: 32,
-    },
-    card: {
-        width: '100%', borderRadius: 24,
-        padding: 24, alignItems: 'center',
-        borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
-    },
-    iconWrap: {
-        width: 64, height: 64, borderRadius: 20,
-        alignItems: 'center', justifyContent: 'center', marginBottom: 16,
-    },
-    title: { fontFamily: 'Inter-Bold', fontSize: 20, color: '#fff', marginBottom: 4 },
-    version: { fontFamily: 'Inter-Medium', fontSize: 13, color: '#FA2D48', marginBottom: 14 },
-    notes: {
-        fontFamily: 'Inter-Regular', fontSize: 13, color: 'rgba(255,255,255,0.55)',
-        textAlign: 'center', lineHeight: 19, marginBottom: 22,
-    },
-    actions: { flexDirection: 'row', gap: 12, width: '100%' },
-    laterBtn: {
-        flex: 1, paddingVertical: 14, borderRadius: 14, alignItems: 'center',
-        backgroundColor: 'rgba(255,255,255,0.08)',
-    },
-    laterText: { fontFamily: 'Inter-SemiBold', fontSize: 15, color: 'rgba(255,255,255,0.7)' },
-    updateBtn: {
-        flex: 1.4, paddingVertical: 14, borderRadius: 14,
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-        backgroundColor: '#FA2D48',
-    },
-    updateText: { fontFamily: 'Inter-SemiBold', fontSize: 15, color: '#fff' },
-    progressWrap: { width: '100%', marginTop: 4 },
-    progressTrack: {
-        height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.1)',
-        overflow: 'hidden', marginBottom: 10,
-    },
-    progressFill: { height: 8, borderRadius: 4, backgroundColor: '#FA2D48' },
-    progressText: {
-        fontFamily: 'Inter-Medium', fontSize: 13, color: 'rgba(255,255,255,0.6)',
-        textAlign: 'center',
-    },
+    backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.28)', alignItems: 'center', justifyContent: 'center' },
+    card: { width: 270, borderRadius: 14, overflow: 'hidden' },
+    body: { paddingHorizontal: 16, paddingVertical: 19, alignItems: 'center' },
+    title: { fontFamily: 'SFProDisplay-Semibold', fontSize: 17, textAlign: 'center' },
+    message: { fontFamily: 'SFProDisplay-Regular', fontSize: 13, lineHeight: 17, marginTop: 4, textAlign: 'center' },
+    track: { alignSelf: 'stretch', height: 4, borderRadius: 2, marginTop: 12, overflow: 'hidden' },
+    fill: { height: 4, borderRadius: 2 },
+    whatsNew: { alignSelf: 'stretch', fontFamily: 'SFProDisplay-Semibold', fontSize: 12, marginTop: 12, opacity: 0.6 },
+    notes: { alignSelf: 'stretch', maxHeight: 220, marginTop: 4 },
+    note: { fontFamily: 'SFProDisplay-Regular', fontSize: 13, lineHeight: 18, marginBottom: 2 },
+    noteHeading: { fontFamily: 'SFProDisplay-Semibold' },
+    rule: { height: StyleSheet.hairlineWidth },
+    action: { height: 44, alignItems: 'center', justifyContent: 'center' },
+    actionText: { fontFamily: 'SFProDisplay-Regular', fontSize: 17 },
+    actionBold: { fontFamily: 'SFProDisplay-Semibold' },
 });
