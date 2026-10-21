@@ -4,7 +4,7 @@
 // TIDAL catalogue before it is shown or queued.
 import { API } from '../api';
 import type { Album, Track } from '../types';
-import { bestRecording, normalizeMusicText } from './musicMatching';
+import { bestRecording, looseSameRecording, normalizeMusicText } from './musicMatching';
 export { mapConcurrent } from './asyncTools';
 
 const MUSIC_BASE = 'https://music.youtube.com/youtubei/v1';
@@ -307,7 +307,11 @@ export function matchTrack(song: YtSong): Promise<Track | null> {
             const results = await API.search(query);
             // The runtime check stays on: dropping it only lets in remasters and
             // extended cuts, never fixes title noise (recordingTitle handles that).
-            return bestRecording({ title: song.title, artist: song.artist, duration: song.durationSec, album: song.album }, results);
+            return bestRecording({ title: song.title, artist: song.artist, duration: song.durationSec, album: song.album }, results)
+                // YouTube titles often add words the catalogue lacks; accept those
+                // only when the length agrees within a few seconds.
+                ?? results.find(track => looseSameRecording({ title: song.title, artist: song.artist, duration: song.durationSec }, track, 3))
+                ?? null;
         })();
         trackMatches.set(song.videoId, pending);
         pending.catch(() => trackMatches.delete(song.videoId));
@@ -337,7 +341,7 @@ export function seedVideoId(track: Track): Promise<string | null> {
         pending = searchSong(`${track.title} ${track.artist?.name || ''}`.trim()).then(song => {
             if (!song) return null;
             // The hit must be this recording; a cover would seed the wrong station.
-            const same = bestRecording({ title: song.title, artist: song.artist, duration: song.durationSec }, [track]);
+            const same = looseSameRecording({ title: song.title, artist: song.artist, duration: song.durationSec }, track);
             return same ? song.videoId : null;
         });
         seedIds.set(track.id, pending);

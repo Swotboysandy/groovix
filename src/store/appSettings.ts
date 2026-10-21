@@ -16,6 +16,8 @@ export interface AppSettings {
     sourceOrder: StreamSource[];
     // Playback
     noRepeatInSession: boolean;
+    /** Endless related songs after your own queue. */
+    autoplay: boolean;
     // Appearance
     fullScreenCoverArt: boolean;
     reduceAnimation: boolean;
@@ -39,6 +41,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     qualityMobile: 'LOSSLESS',
     sourceOrder: ['TIDAL', 'JIOSAAVN', 'AUDIUS'],
     noRepeatInSession: false,
+    autoplay: true,
     fullScreenCoverArt: true,
     reduceAnimation: false,
     reduceBlur: false,

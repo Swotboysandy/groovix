@@ -1,11 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import {
-    View, Text, Modal, TouchableOpacity, StyleSheet,
+    View, Text, Modal, TouchableOpacity, StyleSheet, NativeModules,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import { checkForUpdate, downloadAndInstall, type UpdateInfo } from '../services/updater';
 import { useAppDialog } from '../context/DialogContext';
 import { useTheme } from '../context/ThemeContext';
+
+const NOTIFIED_KEY = 'groovix:update-notified';
+const RECHECK_MS = 6 * 60 * 60 * 1000;
+
+/** The first plain sentence of the release notes, for the notification text. */
+function firstLine(notes?: string): string {
+    const line = (notes || '').split('\n').map(text => text.replace(/^[#*\-\s]+/, '').replace(/\*\*/g, '').trim()).find(text => text && !/^what's new$/i.test(text));
+    return line ? line.slice(0, 140) : 'Tap to update to the latest version.';
+}
 
 export default function UpdatePrompt() {
     const { showDialog } = useAppDialog();
@@ -16,12 +26,22 @@ export default function UpdatePrompt() {
 
     useEffect(() => {
         let active = true;
-        // Let the first frame render, then check promptly in the background.
-        const t = setTimeout(async () => {
-            const info = await checkForUpdate();
-            if (active && info) setUpdate(info);
-        }, 500);
-        return () => { active = false; clearTimeout(t); };
+        const check = async () => {
+            const info = await checkForUpdate().catch(() => null);
+            if (!active || !info) return;
+            setUpdate(info);
+            // One shade notification per new version, so it isn't repeated every check.
+            const notified = await AsyncStorage.getItem(NOTIFIED_KEY).catch(() => null);
+            if (notified !== info.version) {
+                NativeModules.ApkInstaller?.notifyUpdate?.(info.version, firstLine(info.notes));
+                await AsyncStorage.setItem(NOTIFIED_KEY, info.version).catch(() => {});
+            }
+        };
+        // Let the first frame render, then check; again every few hours while
+        // the app stays alive (music playing in the background, for example).
+        const first = setTimeout(check, 500);
+        const repeat = setInterval(check, RECHECK_MS);
+        return () => { active = false; clearTimeout(first); clearInterval(repeat); };
     }, []);
 
     const handleUpdate = async () => {

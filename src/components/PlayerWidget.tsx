@@ -26,7 +26,7 @@ import SkeletonPulse from './SkeletonPulse';
 import QueuePanel from './QueuePanel';
 import { useSongMenu } from './SongMenu';
 import { haptic } from '../services/haptics';
-import { useAppSettings } from '../store/appSettings';
+import { updateAppSettings, useAppSettings } from '../store/appSettings';
 import { translateLyrics } from '../services/lyricsTranslation';
 
 import { API, LyricLine, parseLRCString, parseTTMLString, getLastLyricsSource } from '../api';
@@ -265,7 +265,7 @@ export default function PlayerWidget() {
         currentTrack, isPlaying, isBuffering, currentTime, duration,
         volume, quality, togglePlayPause, seek, setVolume, setQuality, playNext,
         playPrevious, shuffle, toggleShuffle, repeatMode, cycleRepeat,
-        verifiedFormat, lucidaProgress, usingFallback, queue, upNext, history, playTrack,
+        verifiedFormat, lucidaProgress, usingFallback, queue, upNext, history, playTrack, loadMoreUpNext,
         playFromUpNext, removeFromQueue, moveInQueue, clearQueue,
     } = usePlayer();
     const { colors } = useTheme();
@@ -950,18 +950,18 @@ export default function PlayerWidget() {
                             <View style={styles.actionRow}>
                                 {showQueue ? (
                                     <Animated.View entering={FadeIn.duration(180).delay(120)} exiting={FadeOut.duration(120)} style={[styles.pill, styles.modePill]}>
-                                        <TouchableOpacity style={[styles.pillSegment, styles.modeSegment]} onPress={() => { haptic(shuffle ? 'toggleOff' : 'toggleOn'); toggleShuffle(); }} accessibilityRole="button" accessibilityLabel={shuffle ? 'Shuffle on' : 'Shuffle off'}>
-                                            <Ionicons name="shuffle" size={26} color={shuffle ? '#FFFFFF' : 'rgba(255,255,255,0.6)'} />
+                                        <TouchableOpacity style={[styles.pillSegment, styles.modeSegment, shuffle && styles.modeOn]} onPress={() => { haptic(shuffle ? 'toggleOff' : 'toggleOn'); toggleShuffle(); }} accessibilityRole="switch" accessibilityState={{ checked: shuffle }} accessibilityLabel="Shuffle">
+                                            <Ionicons name="shuffle" size={26} color={shuffle ? '#000000' : 'rgba(255,255,255,0.6)'} />
                                         </TouchableOpacity>
                                         <View style={[styles.pillDivider, styles.modeSegment]} />
-                                        <TouchableOpacity style={[styles.pillSegment, styles.modeSegment]} onPress={() => { haptic('select'); cycleRepeat(); }} accessibilityRole="button" accessibilityLabel={`Repeat ${repeatMode}`}>
-                                            <Ionicons name="repeat" size={26} color={repeatMode !== 'off' ? '#FFFFFF' : 'rgba(255,255,255,0.6)'} />
+                                        <TouchableOpacity style={[styles.pillSegment, styles.modeSegment, repeatMode !== 'off' && styles.modeOn]} onPress={() => { haptic(repeatMode === 'one' ? 'toggleOff' : 'toggleOn'); cycleRepeat(); }} accessibilityRole="button" accessibilityLabel={`Repeat ${repeatMode}`}>
+                                            <Ionicons name="repeat" size={26} color={repeatMode !== 'off' ? '#000000' : 'rgba(255,255,255,0.6)'} />
                                             {repeatMode === 'one' && <Text style={styles.repeatOneBadge}>1</Text>}
                                         </TouchableOpacity>
                                         <View style={[styles.pillDivider, styles.modeSegment]} />
-                                        <View style={[styles.pillSegment, styles.modeSegment, styles.pillSegmentOn]}>
-                                            <Ionicons name="infinite" size={28} color="#FFFFFF" />
-                                        </View>
+                                        <TouchableOpacity style={[styles.pillSegment, styles.modeSegment, settings.autoplay && styles.modeOn]} onPress={() => { haptic(settings.autoplay ? 'toggleOff' : 'toggleOn'); void updateAppSettings({ autoplay: !settings.autoplay }); }} accessibilityRole="switch" accessibilityState={{ checked: settings.autoplay }} accessibilityLabel="AutoPlay">
+                                            <Ionicons name="infinite" size={28} color={settings.autoplay ? '#000000' : 'rgba(255,255,255,0.6)'} />
+                                        </TouchableOpacity>
                                     </Animated.View>
                                 ) : (
                                     <>
@@ -1035,6 +1035,7 @@ export default function PlayerWidget() {
                                         onSkipCurrent={() => playNext()}
                                         history={settings.showQueueHistory ? history : undefined}
                                         onPlayHistory={track => playTrack(track)}
+                                        onLoadMore={loadMoreUpNext}
                                     />
                                 </View>
                             ) : lyricsLoading ? (
@@ -1174,7 +1175,8 @@ const styles = StyleSheet.create({
     pillSegment: { width: 64, height: 44, alignItems: 'center', justifyContent: 'center' },
     pillDivider: { width: 1, height: 44, backgroundColor: 'rgba(255,255,255,0.3)' },
     pillText: { color: '#FFFFFF' },
-    repeatOneBadge: { position: 'absolute', top: 6, right: 14, fontFamily: 'SFProDisplay-Bold', fontSize: 9, color: '#FFFFFF' },
+    repeatOneBadge: { position: 'absolute', top: 6, right: 14, fontFamily: 'SFProDisplay-Bold', fontSize: 9, color: '#000000' },
+    modeOn: { backgroundColor: '#FFFFFF' },
     header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, marginBottom: 30, paddingHorizontal: 30 },
     qualityChip: { paddingHorizontal: 12, paddingVertical: 4, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)' },
     qualityChipText: { fontFamily: 'Inter-Bold', color: '#fff', fontSize: 10, letterSpacing: 0.5 },

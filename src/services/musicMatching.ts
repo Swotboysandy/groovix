@@ -35,6 +35,25 @@ export function sameRecording(source: Recording, candidate: Track): boolean {
     return true;
 }
 
+/**
+ * Same recording when one title extends the other ("Gehra Hua" vs "Gehra Hua
+ * Eclipsa Audio"), as long as an artist is shared, the version words agree and,
+ * when both lengths are known, they are within a few seconds.
+ */
+export function looseSameRecording(source: Recording, candidate: Track, toleranceSec = 6): boolean {
+    if (sameRecording(source, candidate)) return true;
+    const a = recordingTitle(source.title);
+    const b = recordingTitle(candidate.title);
+    if (!a || !b || !(a.startsWith(b) || b.startsWith(a))) return false;
+    if (recordingVariant(source.title) !== recordingVariant(candidate.title)) return false;
+    const credits = (value: string) => value.replace(/\s*-\s*Topic$/i, '')
+        .split(/,|&|;|feat\.?\s|featuring\s|and/i).map(normalizeMusicText).filter(Boolean);
+    const candidateCredits = [candidate.artist?.name || '', ...(candidate.artists || []).map(artist => artist.name)].flatMap(credits);
+    if (!credits(source.artist).some(name => candidateCredits.includes(name))) return false;
+    if (source.duration && candidate.duration && Math.abs(source.duration - candidate.duration) > toleranceSec) return false;
+    return true;
+}
+
 type ScoredRecording = Recording & { album?: string; explicit?: boolean };
 
 /** The best candidate that is the same recording, or null. */

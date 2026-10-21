@@ -1,7 +1,7 @@
 // InlineQueue: "Queue" heading, then Now Playing, Next in
 // queue (drag to reorder, remove) and the AutoPlay section of radio picks.
 import React, { useRef, useState } from 'react';
-import { Animated, FlatList, Image, PanResponder, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Animated, FlatList, Image, PanResponder, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { API } from '../api';
@@ -28,6 +28,8 @@ type Props = {
     /** Played songs, newest first, shown above Now playing when given. */
     history?: Track[];
     onPlayHistory?: (track: Track) => void;
+    /** Called near the end of the list to add more AutoPlay songs. */
+    onLoadMore?: () => void;
 };
 
 function QueueRow({ track, isCurrent, isPlaying, onPress, onRemove, dragHandlers, lifted }: {
@@ -65,7 +67,7 @@ function QueueRow({ track, isCurrent, isPlaying, onPress, onRemove, dragHandlers
     );
 }
 
-export default function QueuePanel({ current, isPlaying, queue, upNext, onJumpTo, onRemove, onMove, onClear, onSkipCurrent, history, onPlayHistory }: Props) {
+export default function QueuePanel({ current, isPlaying, queue, upNext, onJumpTo, onRemove, onMove, onClear, onSkipCurrent, history, onPlayHistory, onLoadMore }: Props) {
     const autoplay = upNext.slice(queue.length);
     const [dragging, setDragging] = useState<number | null>(null);
     const dragY = useRef(new Animated.Value(0)).current;
@@ -160,6 +162,9 @@ export default function QueuePanel({ current, isPlaying, queue, upNext, onJumpTo
                 keyExtractor={item => item.key}
                 renderItem={renderRow}
                 scrollEnabled={dragging === null}
+                onEndReached={onLoadMore}
+                onEndReachedThreshold={1.5}
+                ListFooterComponent={onLoadMore && autoplay.length > 0 ? <ActivityIndicator style={styles.more} color="rgba(255,255,255,0.6)" /> : null}
                 showsVerticalScrollIndicator={false}
                 contentContainerStyle={styles.list}
                 initialNumToRender={14}
@@ -190,5 +195,6 @@ const styles = StyleSheet.create({
     copy: { flex: 1, minWidth: 0, marginLeft: 16 },
     artist: { color: 'rgba(255,255,255,0.55)' },
     nowGlyph: { marginRight: 18 },
+    more: { paddingVertical: 18 },
     remove: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
 });

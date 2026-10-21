@@ -62,6 +62,8 @@ interface PlayerContextType {
     upNext: Track[];
     /** Tracks already played this session, newest first. */
     history: Track[];
+    /** Adds the next related station to AutoPlay (endless list). */
+    loadMoreUpNext: () => void;
     // Starts an item from the displayed Up Next list and preserves everything after it.
     playFromUpNext: (index: number) => void;
     addToQueue: (track: Track) => void;
@@ -111,6 +113,7 @@ const PlayerContext = createContext<PlayerContextType>({
     queue: [],
     upNext: [],
     history: [],
+    loadMoreUpNext: () => { },
     playFromUpNext: () => { },
     addToQueue: () => { },
     removeFromQueue: () => { },
@@ -671,6 +674,34 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         finally { if (radioRequestRef.current?.promise === request) radioRequestRef.current = null; }
     }, []);
 
+    // Endless AutoPlay: the next station is seeded from the last song already in
+    // the list, so scrolling (or a queue running low) keeps adding related music.
+    const moreInFlightRef = useRef(false);
+    const usedSeedsRef = useRef<Set<number>>(new Set());
+    const loadMoreUpNext = useCallback(async () => {
+        if (moreInFlightRef.current || !currentTrackRef.current) return;
+        moreInFlightRef.current = true;
+        const session = playSessionRef.current;
+        try {
+            const candidates = [...autoQueueRef.current].reverse().filter(track => !usedSeedsRef.current.has(track.id));
+            const seeds = candidates.length ? candidates.slice(0, 3) : [currentTrackRef.current];
+            for (const seed of seeds) {
+                usedSeedsRef.current.add(seed.id);
+                const exclude = new Set([seed.id, currentTrackRef.current?.id ?? 0, ...recentIdsRef.current, ...queueRef.current.map(track => track.id),
+                    ...autoQueueRef.current.map(track => track.id), ...sessionSeenRef.current]);
+                const items = await getRadioRecommendations(seed, exclude, 40);
+                if (playSessionRef.current !== session) return;
+                if (items.length === 0) continue;
+                items.forEach(track => sessionSeenRef.current.add(track.id));
+                autoQueueRef.current = appendRadioTracks(autoQueueRef.current, items, new Set([...recentIdsRef.current, ...queueRef.current.map(track => track.id)]));
+                syncUpNext();
+                return;
+            }
+        } catch { /* try again on the next scroll */ } finally {
+            moreInFlightRef.current = false;
+        }
+    }, [syncUpNext]);
+
     // Prepare the next songs as soon as a track starts. The next/skip button can then
     // react immediately instead of waiting for recommendation network calls on press.
     useEffect(() => {
@@ -682,9 +713,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                 autoQueueRef.current = appendRadioTracks(autoQueueRef.current, items, new Set([...recentIdsRef.current, ...queueRef.current.map(track => track.id)]));
                 syncUpNext();
             }
+            // Keep a deep list ready so playback never runs dry.
+            if (!cancelled && autoQueueRef.current.length < 25) void loadMoreUpNext();
         }).catch(() => { });
+        else if (autoQueueRef.current.length < 25) void loadMoreUpNext();
         return () => { cancelled = true; };
-    }, [currentTrack, buildRecommendations, syncUpNext]);
+    }, [currentTrack, buildRecommendations, syncUpNext, loadMoreUpNext]);
 
     // Shared "what plays next" logic, used by both natural track-end and manual skip.
     // Priority: repeat-one → user queue → auto-recommendations → (repeat-all replays) → stop.
@@ -700,6 +734,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             const [next, ...rest] = queueRef.current;
             syncQueue(rest);
             startTrack(next, 0, true);
+            return;
+        }
+
+        // AutoPlay off: after your own queue, repeat-all or stop.
+        if (!appSettings().autoplay) {
+            if (repeatModeRef.current === 'all' && cur) { startTrack(cur, 0, false); return; }
+            desiredPlayingRef.current = false;
+            setIsPlaying(false);
             return;
         }
 
@@ -852,7 +894,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             <PlayerContext.Provider value={{
                 currentTrack, isPlaying, isBuffering, currentTime, duration,
                 volume, quality, playTrack, playPlaylist, togglePlayPause, seek, setVolume, setQuality,
-                playNext, playPrevious, queue, upNext, history, playFromUpNext, addToQueue, removeFromQueue, moveInQueue, playNextInQueue, clearQueue,
+                playNext, playPrevious, queue, upNext, history, loadMoreUpNext, playFromUpNext, addToQueue, removeFromQueue, moveInQueue, playNextInQueue, clearQueue,
                 repeatMode, cycleRepeat, shuffle, toggleShuffle,
                 setOnTrackEnd, verifiedFormat, lucidaProgress, usingFallback,
             }}>
