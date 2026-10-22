@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, Share, StatusBar, StyleSheet, Text, View 
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import { checkDeviceAccess, DeviceAccessResult } from '../services/deviceAccess';
+import { signInWithGoogle } from '../services/youtubeAccount';
 
 type GateState = DeviceAccessResult | { status: 'checking'; deviceId: string };
 
@@ -20,6 +21,17 @@ export default function DeviceAccessGate({ children }: PropsWithChildren) {
 
     useEffect(() => { verify(); }, [verify]);
 
+    // A Google sign-in gets this device approved straight away.
+    const [signInError, setSignInError] = useState('');
+    const signIn = useCallback(async () => {
+        setSignInError('');
+        try {
+            if (await signInWithGoogle()) await verify();
+        } catch {
+            setSignInError('Google sign-in did not finish. Try again.');
+        }
+    }, [verify]);
+
     if (state.status === 'approved') return <>{children}</>;
 
     const checking = state.status === 'checking';
@@ -35,7 +47,7 @@ export default function DeviceAccessGate({ children }: PropsWithChildren) {
                     {checking
                         ? 'Securely checking this device…'
                         : pending
-                            ? 'This device is waiting for approval. Ask the Groovix administrator to approve the ID below.'
+                            ? 'Sign in with Google to get access right away, or ask the Groovix administrator to approve the ID below.'
                             : state.message}
                 </Text>
                 {checking ? <ActivityIndicator style={styles.loader} color="#F0445E" /> : null}
@@ -45,6 +57,17 @@ export default function DeviceAccessGate({ children }: PropsWithChildren) {
                         <Text selectable style={styles.idText}>{state.deviceId}</Text>
                     </View>
                 ) : null}
+                {pending ? (
+                    <Pressable
+                        accessibilityRole="button"
+                        style={({ pressed }) => [styles.googleButton, pressed && styles.pressed]}
+                        onPress={signIn}
+                    >
+                        <Ionicons name="logo-google" size={19} color="#09090B" />
+                        <Text style={styles.googleText}>Sign in with Google</Text>
+                    </Pressable>
+                ) : null}
+                {signInError ? <Text style={styles.signInError}>{signInError}</Text> : null}
                 {!checking ? (
                     <View style={styles.actions}>
                         {state.deviceId ? (
@@ -88,5 +111,8 @@ const styles = StyleSheet.create({
     secondaryButton: { flex: 1, minHeight: 50, borderRadius: 15, backgroundColor: '#1B1B1F', borderWidth: 1, borderColor: '#303036', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
     primaryText: { color: '#FFFFFF', fontFamily: 'Inter-SemiBold', fontSize: 14 },
     secondaryText: { color: '#FFFFFF', fontFamily: 'Inter-SemiBold', fontSize: 14 },
+    googleButton: { width: '100%', minHeight: 52, borderRadius: 15, backgroundColor: '#FFFFFF', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, marginTop: 26 },
+    googleText: { color: '#09090B', fontFamily: 'Inter-SemiBold', fontSize: 15 },
+    signInError: { color: '#F0445E', fontFamily: 'Inter-Regular', fontSize: 13, marginTop: 10, textAlign: 'center' },
     pressed: { opacity: 0.72 },
 });

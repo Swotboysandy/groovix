@@ -53,6 +53,17 @@ export async function signInWithGoogle(): Promise<YouTubeUser | null> {
     }
 }
 
+/** A current access token for the signed-in account, as proof of a Google sign-in; null when signed out. */
+export async function googleAccessToken(): Promise<string | null> {
+    try {
+        if (!(await currentYouTubeUser())) return null;
+        const { accessToken } = await GoogleSignin.getTokens();
+        return accessToken || null;
+    } catch {
+        return null;
+    }
+}
+
 /** Signs out and revokes Groovix's access to the account. */
 export async function signOutOfGoogle(): Promise<void> {
     configure();

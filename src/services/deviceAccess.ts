@@ -1,6 +1,7 @@
 import { ACCESS_HOSTS } from '../config/private';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { NativeModules, Platform } from 'react-native';
+import { googleAccessToken } from './youtubeAccount';
 
 const DEVICE_ID_KEY = 'groovix:device-access-id';
 
@@ -38,13 +39,15 @@ export async function getStableDeviceId(): Promise<string> {
     return deviceId;
 }
 
-async function requestAccess(host: string, deviceId: string): Promise<DeviceAccessResult | null> {
+async function requestAccess(host: string, deviceId: string, googleToken: string | null): Promise<DeviceAccessResult | null> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 6000);
     try {
         const response = await fetch(`${host}/api/groovix-access?uid=${encodeURIComponent(deviceId)}`, {
             method: 'GET',
-            headers: { Accept: 'application/json', 'X-Device-Id': deviceId },
+            // Signed in with Google: the server checks the token with Google and
+            // approves the device without waiting for the administrator.
+            headers: { Accept: 'application/json', 'X-Device-Id': deviceId, ...(googleToken ? { 'X-Google-Token': googleToken } : {}) },
             signal: controller.signal,
         });
         const body: unknown = await response.json().catch(() => null);
@@ -65,8 +68,9 @@ export async function checkDeviceAccess(): Promise<DeviceAccessResult> {
     const deviceId = await getStableDeviceId();
     // No approval servers configured (a source build): no gate.
     if (ACCESS_HOSTS.length === 0) return { status: 'approved', deviceId };
+    const googleToken = await googleAccessToken();
     for (const host of ACCESS_HOSTS) {
-        const result = await requestAccess(host, deviceId);
+        const result = await requestAccess(host, deviceId, googleToken);
         if (result) return result;
     }
     return {
