@@ -278,17 +278,84 @@ export async function playlistSongs(browseId: string): Promise<{ title: string; 
     const response = await post('browse', { browseId });
     const columns = response?.contents?.twoColumnBrowseResultsRenderer;
     const header = columns?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]?.musicResponsiveHeaderRenderer;
+    const headerThumbnail = bestThumbnail(header?.thumbnail?.musicThumbnailRenderer ?? header?.thumbnail);
+    const headerArtist = runsText(header?.straplineTextOne);
     const songs: YtSong[] = [];
     for (const section of columns?.secondaryContents?.sectionListRenderer?.contents ?? []) {
-        for (const item of section?.musicPlaylistShelfRenderer?.contents ?? []) {
+        const shelf = section?.musicPlaylistShelfRenderer ?? section?.musicShelfRenderer;
+        for (const item of shelf?.contents ?? []) {
             const renderer = item?.musicResponsiveListItemRenderer;
             const song = songFromListItem(renderer);
             if (!song) continue;
             const fixed = runsText(renderer?.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text);
-            songs.push({ ...song, durationSec: song.durationSec ?? parseDuration(fixed) });
+            songs.push({
+                ...song,
+                artist: song.artist || headerArtist,
+                thumbnail: song.thumbnail ?? headerThumbnail,
+                durationSec: song.durationSec ?? parseDuration(fixed),
+            });
         }
     }
-    return { title: runsText(header?.title), thumbnail: bestThumbnail(header?.thumbnail?.musicThumbnailRenderer ?? header?.thumbnail), songs };
+    return { title: runsText(header?.title), thumbnail: headerThumbnail, songs };
+}
+
+// ---- YouTube songs as tracks ----------------------------------------------
+// Like BitChord, YouTube's songs are shown and queued as they come; the
+// lossless recording behind one is looked up only when it is about to play.
+
+/** YouTube's square art, asked for at a size that stays sharp on a large card. */
+function largeThumbnail(url?: string): string {
+    if (!url) return '';
+    return /=w\d+-h\d+/.test(url) ? url.replace(/=w\d+-h\d+[^/]*$/, '=w544-h544-l90-rj') : url;
+}
+
+/** A stable negative id per video, so it never collides with a catalogue id. */
+export function youtubeTrackId(videoId: string): number {
+    let hash = 2166136261;
+    for (let index = 0; index < videoId.length; index += 1) {
+        hash ^= videoId.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return -((hash >>> 0) || 1);
+}
+
+export function youtubeTrack(song: YtSong): Track {
+    const cover = largeThumbnail(song.thumbnail);
+    return {
+        id: youtubeTrackId(song.videoId),
+        title: song.title,
+        duration: song.durationSec ?? 0,
+        artist: { id: 0, name: song.artist },
+        album: { id: 0, title: song.album ?? '', cover },
+        coverUrl: cover,
+        ytVideoId: song.videoId,
+    };
+}
+
+export function youtubeAlbum(album: YtAlbum): Album & { ytBrowseId: string } {
+    return { id: youtubeTrackId(album.browseId), title: album.title, cover: largeThumbnail(album.thumbnail), artist: { id: 0, name: album.artist }, ytBrowseId: album.browseId };
+}
+
+/** A YouTube song that hasn't been matched to a playable recording yet. */
+export function isYouTubeOnly(track?: Track | null): boolean {
+    return Boolean(track?.ytVideoId) && (track?.id ?? 0) < 0;
+}
+
+/** Both ids a song can appear under in a queue: its catalogue id and its YouTube one. */
+export function trackIds(track: Track): number[] {
+    return track.ytVideoId && track.id > 0 ? [track.id, youtubeTrackId(track.ytVideoId)] : [track.id];
+}
+
+/** The playable recording for a YouTube song (cached), or null when none matches. */
+export function resolveYouTubeTrack(track: Track): Promise<Track | null> {
+    if (!isYouTubeOnly(track)) return Promise.resolve(track);
+    return matchTrack({
+        videoId: track.ytVideoId!,
+        title: track.title,
+        artist: track.artist?.name || '',
+        album: track.album?.title || undefined,
+        durationSec: track.duration || undefined,
+    }).then(found => found ? { ...found, ytVideoId: track.ytVideoId } : null);
 }
 
 // ---- Matching onto TIDAL --------------------------------------------------
@@ -336,6 +403,7 @@ export function matchAlbum(album: YtAlbum): Promise<Album | null> {
 
 /** The YouTube id for a TIDAL seed, found by searching its title and artist. */
 export function seedVideoId(track: Track): Promise<string | null> {
+    if (track.ytVideoId) return Promise.resolve(track.ytVideoId);
     let pending = seedIds.get(track.id);
     if (!pending) {
         pending = searchSong(`${track.title} ${track.artist?.name || ''}`.trim()).then(song => {

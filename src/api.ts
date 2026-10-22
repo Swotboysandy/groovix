@@ -44,6 +44,33 @@ async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = API
     }
 }
 
+// Catalogue hosts, tried in order: the hifi server first, Monochrome as backup.
+const CATALOG_URLS = [HIFI_API_URL, MONOCHROME_URL].filter(Boolean);
+
+/** The first OK catalogue response for [path], or the last failure. */
+async function catalogFetch(path: string): Promise<Response> {
+    let last: Response | null = null;
+    let error: unknown = null;
+    for (const base of CATALOG_URLS) {
+        try {
+            const response = await fetchWithTimeout(`${base}${path}`);
+            if (response.ok) return response;
+            last = response;
+        } catch (e) { error = e; }
+    }
+    if (last) return last;
+    throw error ?? new Error('Catalog unavailable');
+}
+
+/** catalogRequest across the catalogue hosts. */
+async function catalogJson(path: string): Promise<unknown> {
+    let error: unknown = null;
+    for (const base of CATALOG_URLS) {
+        try { return await catalogRequest(`${base}${path}`); } catch (e) { error = e; }
+    }
+    throw error ?? new Error('Catalog unavailable');
+}
+
 function stableNumericId(value: string): number {
     let hash = 2166136261;
     for (let index = 0; index < value.length; index += 1) {
@@ -648,7 +675,7 @@ function sectionItems(payload: any, key: string): any[] {
 
 async function searchTidalSection(parameter: 'a' | 'al' | 'p', key: 'artists' | 'albums' | 'playlists', query: string): Promise<any[]> {
     try {
-        const response = await fetchWithTimeout(`${MONOCHROME_URL}/search/?${parameter}=${encodeURIComponent(query.trim())}`);
+        const response = await catalogFetch(`/search/?${parameter}=${encodeURIComponent(query.trim())}`);
         if (!response.ok) return [];
         return sectionItems(await response.json(), key);
     } catch {
@@ -837,7 +864,7 @@ export const API = {
 
     async searchTidal(query: string): Promise<Track[]> {
         try {
-            const json = objectRecord(await catalogRequest(`${MONOCHROME_URL}/search/?s=${encodeURIComponent(query)}`));
+            const json = objectRecord(await catalogJson(`/search/?s=${encodeURIComponent(query)}`));
             const data = objectRecord(json.data);
             const items: any[] = Array.isArray(data.items) ? data.items : sectionItems(json, 'tracks');
             return items
@@ -917,7 +944,8 @@ export const API = {
 
     async getTrackInfo(trackId: number): Promise<TrackQualityInfo> {
         try {
-            const res = await fetchWithTimeout(`${RHYTHMAX_URL}/track?id=${trackId}`);
+            let res = await catalogFetch(`/info/?id=${trackId}`).catch(() => null);
+            if (!res?.ok) res = await fetchWithTimeout(`${RHYTHMAX_URL}/track?id=${trackId}`);
             if (!res.ok) throw new Error('Info fetch failed');
             const json = await res.json();
             const d = json?.data ?? json;
@@ -939,7 +967,7 @@ export const API = {
 
     async getAlbum(albumId: number): Promise<{ album: any; tracks: Track[] }> {
         try {
-            const res = await fetchWithTimeout(`${MONOCHROME_URL}/album/?id=${albumId}`);
+            const res = await catalogFetch(`/album/?id=${albumId}`);
             if (!res.ok) throw new Error('Album fetch failed');
             const json = await res.json();
             const data = json?.data ?? json;
@@ -963,8 +991,8 @@ export const API = {
     async getArtist(artistId: number): Promise<{ artist: Artist | null; topTracks: Track[]; albums: Album[]; singles: Album[] }> {
         try {
             const [profileRes, contentRes] = await Promise.all([
-                fetchWithTimeout(`${MONOCHROME_URL}/artist/?id=${artistId}`),
-                fetchWithTimeout(`${MONOCHROME_URL}/artist/?f=${artistId}`),
+                catalogFetch(`/artist/?id=${artistId}`),
+                catalogFetch(`/artist/?f=${artistId}`),
             ]);
             const profile = profileRes.ok ? await profileRes.json() : null;
             const content = contentRes.ok ? await contentRes.json() : null;
@@ -1001,7 +1029,7 @@ export const API = {
 
     async getPlaylist(playlistId: string): Promise<{ playlist: Playlist | null; tracks: Track[] }> {
         try {
-            const response = await fetchWithTimeout(`${MONOCHROME_URL}/playlist/?id=${encodeURIComponent(playlistId)}`);
+            const response = await catalogFetch(`/playlist/?id=${encodeURIComponent(playlistId)}`);
             if (!response.ok) throw new Error('Playlist fetch failed');
             const json = await response.json();
             const data = json?.data ?? json;

@@ -12,6 +12,15 @@ import { recordPlayedTrack } from '../store/listeningProfile';
 import { recordListening } from '../store/playHistory';
 import { getRadioRecommendations } from '../services/recommendations';
 import { appendRadioTracks } from '../services/musicMatching';
+import { isYouTubeOnly, resolveYouTubeTrack, trackIds } from '../services/ytmusic';
+
+/** Matches the next few YouTube songs ahead of time, so skipping to one is instant. */
+function prepareUpcoming(list: Track[]) {
+    list.slice(0, 3).forEach(track => { if (isYouTubeOnly(track)) void resolveYouTubeTrack(track).catch(() => null); });
+}
+
+/** Songs in a row that may fail before playback stops instead of skipping again. */
+const MAX_UNPLAYABLE_SKIPS = 5;
 
 export type StreamQuality = 'HI_RES_LOSSLESS' | 'LOSSLESS' | 'HIGH' | 'LOW';
 
@@ -236,15 +245,28 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const syncUpNext = useCallback(() => {
-        setUpNext([...queueRef.current, ...autoQueueRef.current]);
+        const next = [...queueRef.current, ...autoQueueRef.current];
+        setUpNext(next);
+        prepareUpcoming(next);
     }, []);
     const syncQueue = useCallback((next: Track[]) => {
         queueRef.current = next;
         setQueue(next);
         setUpNext([...next, ...autoQueueRef.current]);
+        prepareUpcoming([...next, ...autoQueueRef.current]);
     }, []);
     const rememberPlayed = useCallback((t: Track) => {
-        recentIdsRef.current = [t.id, ...recentIdsRef.current.filter(id => id !== t.id)].slice(0, 40);
+        const ids = trackIds(t);
+        recentIdsRef.current = [...ids, ...recentIdsRef.current.filter(id => !ids.includes(id))].slice(0, 40);
+    }, []);
+    // A song no source can play skips to the next one instead of stopping the music.
+    const skipUnplayableRef = useRef<() => void>(() => {});
+    const unplayableSkipsRef = useRef(0);
+    const skipUnplayable = useCallback(() => {
+        if (unplayableSkipsRef.current >= MAX_UNPLAYABLE_SKIPS) return false;
+        unplayableSkipsRef.current += 1;
+        skipUnplayableRef.current();
+        return true;
     }, []);
 
     const stopLucidaPoll = useCallback(() => {
@@ -334,10 +356,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             setIsBuffering(false);
             streamReloadingRef.current = false;
             if (streamReloadGuardTimerRef.current) clearTimeout(streamReloadGuardTimerRef.current);
+            if (skipUnplayable()) return;
             desiredPlayingRef.current = false;
             setIsPlaying(false);
         }
-    }, [stopLucidaPoll]);
+    }, [stopLucidaPoll, skipUnplayable]);
 
     const fetchStream = useCallback(async (track: Track, q: StreamQuality) => {
         const requestId = ++streamRequestIdRef.current;
@@ -398,12 +421,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             } else {
                 setIsBuffering(false);
                 streamReloadingRef.current = false;
+                if (streamReloadGuardTimerRef.current) clearTimeout(streamReloadGuardTimerRef.current);
+                if (skipUnplayable()) return;
                 desiredPlayingRef.current = false;
                 setIsPlaying(false);
-                if (streamReloadGuardTimerRef.current) clearTimeout(streamReloadGuardTimerRef.current);
             }
         }
-    }, [fallbackToDefaultSource, stopLucidaPoll]);
+    }, [fallbackToDefaultSource, stopLucidaPoll, skipUnplayable]);
 
     // Core "start playing this track". recordHistory=false when we're navigating *into*
     // history (previous button) or replaying (repeat-one), so we don't re-push and loop.
@@ -411,15 +435,41 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const listenedMsRef = useRef(0);
     const lastProgressRef = useRef(0);
 
-    const startTrack = useCallback((track: Track, startAt: number = 0, recordHistory: boolean = true) => {
+    // While a YouTube song is being matched, the song that was playing before it.
+    const resolvingFromRef = useRef<Track | null | undefined>(undefined);
+    const startTrackRef = useRef<(track: Track, startAt?: number, recordHistory?: boolean, matched?: boolean) => void>(() => {});
+
+    const startTrack = useCallback((track: Track, startAt: number = 0, recordHistory: boolean = true, matched: boolean = false) => {
+        // A YouTube song shows straight away and is matched to its playable
+        // recording only now that it is about to play, as BitChord does.
+        if (isYouTubeOnly(track) && !matched) {
+            const session = ++playSessionRef.current;
+            if (resolvingFromRef.current === undefined) resolvingFromRef.current = currentTrackRef.current;
+            currentTrackRef.current = track;
+            streamRequestIdRef.current += 1;
+            setCurrentTrack(track);
+            desiredPlayingRef.current = true;
+            setIsPlaying(true);
+            setIsBuffering(true);
+            setStreamUrl(null);
+            setCurrentTime(0);
+            setDuration(0);
+            resolveYouTubeTrack(track).catch(() => null).then(real => {
+                if (playSessionRef.current !== session) return;
+                // No catalogue match: try the song through the free fallback sources.
+                startTrackRef.current(real ?? { ...track }, startAt, recordHistory, true);
+            });
+            return;
+        }
         playSessionRef.current += 1;
-        const outgoing = currentTrackRef.current;
+        const outgoing = resolvingFromRef.current !== undefined ? resolvingFromRef.current : currentTrackRef.current;
+        resolvingFromRef.current = undefined;
         // Replay's log: what was actually heard of the outgoing track.
         if (outgoing) {
             recordListening(outgoing, listenStartedAtRef.current, listenedMsRef.current).catch(() => undefined);
             scrobbleIfHeard(appSettings().listenBrainzToken, outgoing, listenStartedAtRef.current, listenedMsRef.current);
         }
-        sessionSeenRef.current.add(track.id);
+        trackIds(track).forEach(id => sessionSeenRef.current.add(id));
         sendNowPlaying(appSettings().listenBrainzToken, track);
         listenStartedAtRef.current = Date.now();
         listenedMsRef.current = 0;
@@ -441,8 +491,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         currentTimeRef.current = startAt;
         // onLoad seeks to a pending position once the stream is ready (used for jam late-join sync).
         pendingSeekRef.current = startAt > 0 ? startAt : null;
-        fetchStream(track, qualityRef.current);
-    }, [fetchStream, rememberPlayed]);
+        if (isYouTubeOnly(track)) {
+            currentTrackRef.current = track;
+            void fallbackToDefaultSource(track, ++streamRequestIdRef.current);
+        } else {
+            fetchStream(track, qualityRef.current);
+        }
+    }, [fetchStream, fallbackToDefaultSource, rememberPlayed]);
+    startTrackRef.current = startTrack;
 
     const playTrack = useCallback((track: Track, startAt: number = 0) => {
         autoQueueRef.current = [];
@@ -526,6 +582,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const onLoad = useCallback((data: any) => {
+        unplayableSkipsRef.current = 0;
         const loadedDuration = Number(data.duration) || 0;
         const activeTrack = currentTrackRef.current;
         // Some upstream manifests are codec-valid FLAC but contain only a
@@ -642,9 +699,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         }
         setIsBuffering(false);
         streamReloadingRef.current = false;
+        if (skipUnplayable()) return;
         desiredPlayingRef.current = false;
         setIsPlaying(false);
-    }, [fallbackToDefaultSource, streamUrl]);
+    }, [fallbackToDefaultSource, streamUrl, skipUnplayable]);
 
     // Builds a diverse radio batch from public ListenBrainz/MusicBrainz similarity
     // signals, then blends in the user's on-device listening profile. The service has
@@ -657,7 +715,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         const pending = radioRequestRef.current;
         if (pending?.session === session) return pending.promise;
         const request = (async () => {
-        const recent = new Set([cur.id, ...recentIdsRef.current, ...queueRef.current.map(track => track.id), ...autoQueueRef.current.map(track => track.id),
+        const recent = new Set([...trackIds(cur), ...recentIdsRef.current, ...queueRef.current.flatMap(trackIds), ...autoQueueRef.current.flatMap(trackIds),
             ...(appSettings().noRepeatInSession ? sessionSeenRef.current : [])]);
         const uniq = await getRadioRecommendations(cur, recent, 60);
         uniq.forEach(track => sessionSeenRef.current.add(track.id));
@@ -686,18 +744,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             const candidates = [...autoQueueRef.current].reverse().filter(track => !usedSeedsRef.current.has(track.id));
             // Keep pulling stations until at least 25 songs are lined up; one seed
             // can return only a couple of new songs once duplicates are dropped.
-            const seeds = [...candidates.slice(0, 6), currentTrackRef.current, ...queueRef.current.slice(-2)]
+            const seeds = [...candidates.slice(0, 6), currentTrackRef.current, ...queueRef.current.slice(-2), ...historyRef.current.slice(0, 3)]
                 .filter((seed, i, all) => all.findIndex(other => other.id === seed.id) === i);
             for (const seed of seeds) {
                 if (autoQueueRef.current.length >= 25) return;
                 usedSeedsRef.current.add(seed.id);
-                const exclude = new Set([seed.id, currentTrackRef.current?.id ?? 0, ...recentIdsRef.current, ...queueRef.current.map(track => track.id),
-                    ...autoQueueRef.current.map(track => track.id), ...sessionSeenRef.current]);
+                const exclude = new Set([...trackIds(seed), ...(currentTrackRef.current ? trackIds(currentTrackRef.current) : []), ...recentIdsRef.current,
+                    ...queueRef.current.flatMap(trackIds), ...autoQueueRef.current.flatMap(trackIds), ...sessionSeenRef.current]);
                 const items = await getRadioRecommendations(seed, exclude, 40);
                 if (playSessionRef.current !== session) return;
                 if (items.length === 0) continue;
                 items.forEach(track => sessionSeenRef.current.add(track.id));
-                autoQueueRef.current = appendRadioTracks(autoQueueRef.current, items, new Set([...recentIdsRef.current, ...queueRef.current.map(track => track.id)]));
+                autoQueueRef.current = appendRadioTracks(autoQueueRef.current, items, new Set([...recentIdsRef.current, ...queueRef.current.flatMap(trackIds)]));
                 syncUpNext();
             }
         } catch { /* try again on the next scroll */ } finally {
@@ -708,12 +766,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // Prepare the next songs as soon as a track starts. The next/skip button can then
     // react immediately instead of waiting for recommendation network calls on press.
     useEffect(() => {
-        if (!currentTrack) return;
+        if (!currentTrack || resolvingFromRef.current !== undefined) return;
         let cancelled = false;
         const session = playSessionRef.current;
         if (autoQueueRef.current.length < 15) buildRecommendations().then(items => {
             if (!cancelled && playSessionRef.current === session && items.length > 0) {
-                autoQueueRef.current = appendRadioTracks(autoQueueRef.current, items, new Set([...recentIdsRef.current, ...queueRef.current.map(track => track.id)]));
+                autoQueueRef.current = appendRadioTracks(autoQueueRef.current, items, new Set([...recentIdsRef.current, ...queueRef.current.flatMap(trackIds)]));
                 syncUpNext();
             }
             // Keep a deep list ready so playback never runs dry.
@@ -725,13 +783,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     // Shared "what plays next" logic, used by both natural track-end and manual skip.
     // Priority: repeat-one → user queue → auto-recommendations → (repeat-all replays) → stop.
-    const advanceToNextTrack = useCallback(async () => {
+    const advanceToNextTrack = useCallback(async (skippingUnplayable: boolean = false) => {
         if (advancePendingRef.current) return;
         advancePendingRef.current = true;
         const session = playSessionRef.current;
         try {
         const cur = currentTrackRef.current;
-        if (repeatModeRef.current === 'one' && cur) { startTrack(cur, 0, false); return; }
+        if (repeatModeRef.current === 'one' && cur && !skippingUnplayable) { startTrack(cur, 0, false); return; }
 
         if (queueRef.current.length > 0) {
             const [next, ...rest] = queueRef.current;
@@ -753,6 +811,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             if (session !== playSessionRef.current) return;
             autoQueueRef.current = appendRadioTracks(autoQueueRef.current, more, new Set(recentIdsRef.current));
             syncUpNext();
+        }
+        if (autoQueueRef.current.length === 0 && queueRef.current.length === 0) {
+            await loadMoreUpNext();
+            if (session !== playSessionRef.current) return;
+        }
+        if (autoQueueRef.current.length === 0 && queueRef.current.length === 0) {
+            await new Promise<void>(resolve => setTimeout(resolve, 2000));
+            if (session !== playSessionRef.current) return;
+            usedSeedsRef.current.clear();
+            await loadMoreUpNext();
+            if (session !== playSessionRef.current) return;
         }
         // A song can be explicitly queued while recommendations are loading.
         // Re-check that priority after awaiting, rather than skipping past it.
@@ -778,7 +847,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                 setIsBuffering(false);
             }
         } finally { advancePendingRef.current = false; }
-    }, [startTrack, syncQueue, buildRecommendations, syncUpNext]);
+    }, [startTrack, syncQueue, buildRecommendations, syncUpNext, loadMoreUpNext]);
 
     const playNext = useCallback((track?: Track) => {
         // Manual skip shouldn't hand control to the jam owner — that's only for natural
@@ -786,6 +855,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (track) { autoQueueRef.current = []; syncUpNext(); startTrack(track, 0, true); return; }
         advanceToNextTrack();
     }, [startTrack, advanceToNextTrack, syncUpNext]);
+    skipUnplayableRef.current = () => { void advanceToNextTrack(true); };
 
     const playFromUpNext = useCallback((index: number) => {
         if (index < 0) return;

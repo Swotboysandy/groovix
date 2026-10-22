@@ -599,7 +599,7 @@ export default function PlayerWidget() {
 
     const contextY = useSharedValue(0);
     const panGesture = Gesture.Pan()
-        .enabled(!showLyrics)
+        .enabled(!showLyrics && !showQueue)
         .activeOffsetY([-10, 10])
         .failOffsetX([-20, 20])
         .onStart(() => {
@@ -630,7 +630,7 @@ export default function PlayerWidget() {
         });
 
     const tapGesture = Gesture.Tap()
-        .enabled(!showLyrics)
+        .enabled(!showLyrics && !showQueue)
         .onStart(() => {
             'worklet';
             if (dragY.value > MINIMIZED_Y * 0.8) {

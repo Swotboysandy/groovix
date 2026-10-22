@@ -19,7 +19,7 @@ import SkeletonPulse from '../components/SkeletonPulse';
 import { useScreenStatusBar } from '../hooks/useScreenStatusBar';
 import { useSongMenu } from '../components/SongMenu';
 import { BackCircle, glassStyles } from '../components/GlassHeader';
-import { mapConcurrent, matchTrack, playlistSongs, type YtPlaylist } from '../services/ytmusic';
+import { playlistSongs, youtubeTrack, type YtPlaylist } from '../services/ytmusic';
 import { GX_DARK, GX_LIGHT, GX_TYPE, PAGE_GUTTER, PLAYING_ACCENT, SHELF_CARD_WIDTH, trackColumnWidth, type GXColors } from '../theme/groovix';
 
 const SLEEVE_FRACTION = 0.76;
@@ -168,23 +168,15 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
                 if (!live) return;
                 setTracks(profile.likedTracks);
             } else if (params.ytPlaylistId != null) {
-                // A YouTube Music playlist: its songs are matched onto TIDAL a
-                // batch at a time so the list fills in as matches land.
+                // A YouTube Music playlist or album: its songs list straight
+                // away, and each is matched to a playable recording when it plays.
                 const page = await playlistSongs(params.ytPlaylistId);
                 if (!live) return;
                 setPlaylist(current => ({
                     id: params.ytPlaylistId!, title: page.title || current?.title || '', cover: page.thumbnail || current?.cover || '',
                     numberOfTracks: page.songs.length, duration: 0, creatorName: 'YouTube Music',
                 }));
-                const songs = page.songs.slice(0, 60);
-                const matched: Track[] = [];
-                for (let start = 0; start < songs.length && live; start += 8) {
-                    const batch = await mapConcurrent(songs.slice(start, start + 8), 8, song => matchTrack(song).catch(() => null));
-                    if (!live) return;
-                    matched.push(...batch.filter((track): track is Track => track !== null));
-                    setTracks(matched.slice());
-                    if (start === 0) setLoading(false);
-                }
+                setTracks(page.songs.map(youtubeTrack));
             } else if (params.playlistId != null) {
                 const page = await API.getPlaylist(params.playlistId);
                 if (!live) return;

@@ -67,6 +67,8 @@ export interface Track {
     providerId?: string;
     localPath?: string;
     coverUrl?: string;
+    /** YouTube Music video id. With a negative [id] the song isn't matched to a playable source yet. */
+    ytVideoId?: string;
     isrc?: string;
     sourceUrl?: string;
     chartRank?: number;

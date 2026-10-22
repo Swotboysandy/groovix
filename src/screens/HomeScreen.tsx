@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, Image, RefreshControl, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import Animated, { FadeIn } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import { API } from '../api';
@@ -10,6 +12,7 @@ import { usePlayerSummary } from '../context/PlayerContext';
 import { useTheme } from '../context/ThemeContext';
 import { getListeningProfile } from '../store/listeningProfile';
 import { getUserProfile } from '../store/userProfile';
+import { appSettings } from '../store/appSettings';
 import { useFocusEffect } from '@react-navigation/native';
 import type { Album, Track } from '../types';
 import { useScreenStatusBar } from '../hooks/useScreenStatusBar';
@@ -17,12 +20,14 @@ import { ProfileCircle } from '../components/GlassHeader';
 import { useSongMenu } from '../components/SongMenu';
 import { currentYouTubeUser, likedTracks, subscribedArtists } from '../services/youtubeAccount';
 import { ACCENT_RED, GX_DARK, GX_LIGHT, GX_TYPE, HERO_CARD_RATIO, PAGE_GUTTER, PLAYING_ACCENT, SHELF_CARD_WIDTH, heroCardWidth, trackColumnWidth } from '../theme/groovix';
-import { HOME_SUPPLEMENT_BROWSE_IDS, home, homeSupplement, mapConcurrent, matchAlbum, matchTrack, moreHome, type YtShelf } from '../services/ytmusic';
+import { HOME_SUPPLEMENT_BROWSE_IDS, home, homeSupplement, mapConcurrent, moreHome, youtubeAlbum, youtubeTrack, type YtShelf } from '../services/ytmusic';
 
 /** A YouTube Music Home shelf once its items are matched to playable songs/albums. */
 type Shelf = { key: string; title: string; tracks?: Track[]; albums?: Album[] };
 
 const SHELF_ITEMS = 16;
+/** The last Home that loaded, painted instantly on the next launch while it refreshes. */
+const HOME_CACHE_KEY = 'groovix:home-cache-v1';
 const MIN_SHELF_ITEMS = 4;
 
 function uniqueTracks(tracks: Track[]): Track[] {
@@ -34,15 +39,16 @@ function cover(track: Track, size: number): string {
     return API.getCoverUrl(track.album?.cover, size);
 }
 
-/** Matches a shelf's items; shelves with too few playable items are dropped. */
+/**
+ * A YouTube shelf as it comes, the way BitChord paints Home: nothing is matched
+ * up front, each song is matched to its playable recording when it plays.
+ */
 async function resolveShelf(shelf: YtShelf, key: string): Promise<Shelf | null> {
     if (shelf.kind === 'songs') {
-        const matched = await mapConcurrent(shelf.items.slice(0, SHELF_ITEMS), 4, song => matchTrack(song).catch(() => null));
-        const tracks = uniqueTracks(matched.filter((track): track is Track => Boolean(track)));
+        const tracks = uniqueTracks(shelf.items.slice(0, SHELF_ITEMS).map(youtubeTrack));
         return tracks.length >= MIN_SHELF_ITEMS ? { key, title: shelf.title, tracks } : null;
     }
-    const matched = await mapConcurrent(shelf.items.slice(0, SHELF_ITEMS), 4, album => matchAlbum(album).catch(() => null));
-    const albums = matched.filter((album): album is Album => Boolean(album));
+    const albums = shelf.items.slice(0, SHELF_ITEMS).map(youtubeAlbum);
     return albums.length >= MIN_SHELF_ITEMS ? { key, title: shelf.title, albums } : null;
 }
 
@@ -77,10 +83,15 @@ export default function HomeScreen({ navigation }: any) {
 
     // Shelves arrive one at a time; a title already on the page is not added twice.
     const publishedCount = useRef(0);
+    const shelvesRef = useRef<Shelf[]>([]);
+    const showingCache = useRef(false);
     const publish = useCallback((gen: number, shelf: Shelf | null) => {
         if (!shelf || gen !== generation.current) return;
         publishedCount.current += 1;
-        setShelves(current => current.some(item => item.title.toLocaleLowerCase() === shelf.title.toLocaleLowerCase()) ? current : [...current, shelf]);
+        const base = showingCache.current ? [] : shelvesRef.current;
+        showingCache.current = false;
+        shelvesRef.current = base.some(item => item.title.toLocaleLowerCase() === shelf.title.toLocaleLowerCase()) ? base : [...base, shelf];
+        setShelves(shelvesRef.current);
     }, []);
 
     // Home first, then New releases and Explore, each painted as soon as it lands.
@@ -88,7 +99,8 @@ export default function HomeScreen({ navigation }: any) {
         const gen = ++generation.current;
         continuation.current = null;
         publishedCount.current = 0;
-        setShelves([]);
+        // A cached Home stays on screen until fresh shelves replace it.
+        if (!showingCache.current) { shelvesRef.current = []; setShelves([]); }
         setFailed(false);
         setPending(1 + HOME_SUPPLEMENT_BROWSE_IDS.length);
         getListeningProfile().then(profile => { if (gen === generation.current) setRecentTracks(profile.recentTracks.slice(0, 12)); }).catch(() => {});
@@ -96,11 +108,14 @@ export default function HomeScreen({ navigation }: any) {
         const settle = () => { if (gen === generation.current) setPending(count => Math.max(0, count - 1)); };
         const homePage = home().then(async feed => {
             continuation.current = feed.continuation;
-            for (const [index, shelf] of feed.shelves.entries()) publish(gen, await resolveShelf(shelf, `home-${index}`));
+            // Match every shelf at once, then show them in YouTube's order.
+            const resolved = feed.shelves.map((shelf, index) => resolveShelf(shelf, `home-${index}`));
+            for (const shelf of resolved) publish(gen, await shelf);
         });
         const supplements = HOME_SUPPLEMENT_BROWSE_IDS.map(browseId => homeSupplement(browseId).then(async list => {
+            const resolved = list.map((shelf, index) => resolveShelf(shelf, `${browseId}-${index}`));
             await homePage.catch(() => {});
-            for (const [index, shelf] of list.entries()) publish(gen, await resolveShelf(shelf, `${browseId}-${index}`));
+            for (const shelf of resolved) publish(gen, await shelf);
         }).finally(settle));
         // Signed in with Google: the account's own likes and subscriptions.
         const personal = currentYouTubeUser().then(async user => {
@@ -129,12 +144,21 @@ export default function HomeScreen({ navigation }: any) {
             });
             if (publishedCount.current === 0) setFailed(true);
         }
+        if (publishedCount.current > 0) AsyncStorage.setItem(HOME_CACHE_KEY, JSON.stringify(shelvesRef.current)).catch(() => {});
         setRefreshing(false);
     }, [publish]);
 
     useEffect(() => {
-        void loadHome();
-        return () => { generation.current += 1; };
+        let live = true;
+        AsyncStorage.getItem(HOME_CACHE_KEY).then(raw => {
+            const cached: Shelf[] = raw ? JSON.parse(raw) : [];
+            if (live && cached.length && publishedCount.current === 0) {
+                showingCache.current = true;
+                shelvesRef.current = cached;
+                setShelves(cached);
+            }
+        }).catch(() => {}).finally(() => { if (live) void loadHome(); });
+        return () => { live = false; generation.current += 1; };
     }, [loadHome]);
 
     // More shelves past the first page, following Home's own continuation.
@@ -186,7 +210,9 @@ export default function HomeScreen({ navigation }: any) {
     );
 
     const renderAlbumCard = (album: Album, keyPrefix: string) => (
-        <TouchableScale key={`${keyPrefix}-${album.id}`} style={styles.shelfCard} activeScale={0.96} onPress={() => navigation.navigate('AlbumDetail', { albumId: album.id, albumData: album })} onLongPress={() => songMenu({ kind: 'album', album }, navigation)} accessibilityRole="button" accessibilityLabel={album.title}>
+        <TouchableScale key={`${keyPrefix}-${album.id}`} style={styles.shelfCard} activeScale={0.96} onPress={() => (album as { ytBrowseId?: string }).ytBrowseId
+            ? navigation.navigate('AlbumDetail', { ytPlaylistId: (album as { ytBrowseId?: string }).ytBrowseId, ytPlaylistData: { browseId: (album as { ytBrowseId?: string }).ytBrowseId, title: album.title, subtitle: album.artist?.name ?? '', thumbnail: album.cover } })
+            : navigation.navigate('AlbumDetail', { albumId: album.id, albumData: album })} onLongPress={() => songMenu({ kind: 'album', album }, navigation)} accessibilityRole="button" accessibilityLabel={album.title}>
             <View style={[styles.shelfArt, { backgroundColor: c.surfaceVariant, borderColor: c.thumbnailBorder }]}>
                 <Image source={{ uri: API.getCoverUrl(album.cover, 320) }} style={StyleSheet.absoluteFill} />
             </View>
@@ -205,14 +231,19 @@ export default function HomeScreen({ navigation }: any) {
         </TouchableScale>
     );
 
-    const renderShelf = ({ item }: { item: Shelf }) => (
-        <View style={styles.shelf}>
-            {renderSectionHeader(item.title)}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
-                {item.tracks ? item.tracks.map(track => renderShelfCard(track, item.key)) : (item.albums ?? []).map(album => renderAlbumCard(album, item.key))}
-            </ScrollView>
-        </View>
-    );
+    const shownShelves = useRef(new Set<string>());
+    const renderShelf = ({ item }: { item: Shelf }) => {
+        const fresh = !shownShelves.current.has(item.key) && !appSettings().reduceAnimation;
+        shownShelves.current.add(item.key);
+        return (
+            <Animated.View entering={fresh ? FadeIn.duration(280) : undefined} style={styles.shelf}>
+                {renderSectionHeader(item.title)}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
+                    {item.tracks ? item.tracks.map(track => renderShelfCard(track, item.key)) : (item.albums ?? []).map(album => renderAlbumCard(album, item.key))}
+                </ScrollView>
+            </Animated.View>
+        );
+    };
 
     const skeletonBlock = { backgroundColor: c.surfaceVariant };
     const shelfSkeleton = (
@@ -280,12 +311,12 @@ export default function HomeScreen({ navigation }: any) {
                     )}
 
                     {heroShelf?.tracks ? (
-                        <View style={styles.shelf}>
+                        <Animated.View entering={appSettings().reduceAnimation ? undefined : FadeIn.duration(280)} style={styles.shelf}>
                             {renderSectionHeader(heroShelf.title)}
                             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
                                 {heroShelf.tracks.slice(0, 10).map(track => renderHeroCard(track, 'hero'))}
                             </ScrollView>
-                        </View>
+                        </Animated.View>
                     ) : failed ? (
                         <View style={styles.messageState}>
                             <Text style={[GX_TYPE.titleMedium, { color: c.onBackground }]}>Couldn't load your music</Text>

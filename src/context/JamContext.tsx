@@ -122,6 +122,7 @@ function minTrack(t: Track): Track {
         providerId: t.providerId,
         sourceUrl: t.sourceUrl,
         isrc: t.isrc,
+        ytVideoId: t.ytVideoId,
         localPath: t.localPath,
         coverUrl: t.coverUrl,
         audioQuality: t.audioQuality,
@@ -446,7 +447,7 @@ export function JamProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         if (!slugRef.current || !isHostRef.current || !isPlaying || isBuffering) return;
         const pb = me.current.playback;
-        if (!pb || pb.status !== 'playing' || pb.track.id !== currentTrack?.id) return;
+        if (!pb || pb.status !== 'playing' || pb.track?.id !== currentTrack?.id) return;
         const expected = pb.position_ms / 1000 + (Date.now() - pb.ts) / 1000;
         if (Math.abs(currentTime - expected) < 2) return;
         me.current = { ...me.current, playback: { ...pb, position_ms: Math.round(currentTime * 1000), ts: Date.now() } };
