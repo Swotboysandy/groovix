@@ -1,7 +1,7 @@
 // DetailScreen: one page for albums, playlists and artists.
 // Releases get the centred sleeve over a blurred wash; artists get the
 // full-bleed photo, the play circle and paged top songs.
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Image, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import LinearGradient from 'react-native-linear-gradient';
@@ -19,7 +19,7 @@ import SkeletonPulse from '../components/SkeletonPulse';
 import { useScreenStatusBar } from '../hooks/useScreenStatusBar';
 import { useSongMenu } from '../components/SongMenu';
 import { BackCircle, glassStyles } from '../components/GlassHeader';
-import { playlistSongs, youtubeTrack, type YtPlaylist } from '../services/ytmusic';
+import { playlistSongs, musicBrowse, youtubeBrowseParams, youtubeTrack, type YtPlaylist } from '../services/ytmusic';
 import { GX_DARK, GX_LIGHT, GX_TYPE, PAGE_GUTTER, PLAYING_ACCENT, SHELF_CARD_WIDTH, trackColumnWidth, type GXColors } from '../theme/groovix';
 
 const SLEEVE_FRACTION = 0.76;
@@ -41,6 +41,7 @@ type Params = {
     albumId?: number; albumData?: Album;
     playlistId?: string; playlistData?: Playlist;
     artistId?: number; artistData?: Artist;
+    ytArtistId?: string; ytAlbumId?: string;
     ytPlaylistId?: string; ytPlaylistData?: YtPlaylist;
     collection?: 'downloads' | 'liked' | 'youtube' | 'youtubeLiked';
     youtubePlaylistId?: string; youtubePlaylistTitle?: string; youtubePlaylistCover?: string;
@@ -122,7 +123,7 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
     const c = theme === 'soundwave' ? GX_LIGHT : GX_DARK;
     const insets = useSafeAreaInsets();
     const { width, height } = useWindowDimensions();
-    const isArtist = params.artistId != null;
+    const isArtist = params.artistId != null || params.ytArtistId != null;
     const collection = params.collection ? COLLECTIONS[params.collection] : null;
     const isPlaylist = params.playlistId != null || params.ytPlaylistId != null || collection != null;
     const songMenu = useSongMenu();
@@ -139,12 +140,28 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
     const [singles, setSingles] = useState<Album[]>([]);
     const [moreByArtist, setMoreByArtist] = useState<Album[]>([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [browseContinuation, setBrowseContinuation] = useState<string | null>(null);
+    const [loadingMore, setLoadingMore] = useState(false);
 
     useEffect(() => {
         let live = true;
         (async () => {
             setLoading(true);
-            if (params.artistId != null) {
+            setLoadError(null); setBrowseContinuation(null); setLoadingMore(false);
+            setTracks([]); setAlbums([]); setSingles([]); setMoreByArtist([]);
+            if (params.ytArtistId != null || params.ytAlbumId != null) {
+                const page = await musicBrowse(params.ytArtistId ?? params.ytAlbumId!);
+                if (!live) return;
+                setTracks(page.songs.map(youtubeTrack));
+                setBrowseContinuation(page.continuation);
+                if (params.ytArtistId) {
+                    setArtist(current => ({ id: current?.id ?? 0, ...current, name: page.title || current?.name || '', picture: page.thumbnail || current?.picture, ytBrowseId: params.ytArtistId }));
+                    setAlbums(page.albums);
+                } else {
+                    setAlbum(current => ({ id: current?.id ?? 0, ...current, title: page.title || current?.title || '', cover: page.thumbnail || current?.cover || '', ytBrowseId: params.ytAlbumId }));
+                }
+            } else if (params.artistId != null) {
                 const page = await API.getArtist(params.artistId);
                 if (!live) return;
                 if (page.artist) setArtist(page.artist);
@@ -177,6 +194,7 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
                     numberOfTracks: page.songs.length, duration: 0, creatorName: 'YouTube Music',
                 }));
                 setTracks(page.songs.map(youtubeTrack));
+                setBrowseContinuation(page.continuation);
             } else if (params.playlistId != null) {
                 const page = await API.getPlaylist(params.playlistId);
                 if (!live) return;
@@ -195,9 +213,32 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
                 }
             }
             if (live) setLoading(false);
-        })();
+        })().catch(() => {
+            if (live) { setLoadError('Could not load this page. Go back and try again.'); setLoading(false); }
+        });
         return () => { live = false; };
-    }, [params.albumId, params.playlistId, params.artistId, params.albumData, params.ytPlaylistId, params.collection]);
+    }, [params.ytArtistId, params.ytAlbumId, params.albumId, params.playlistId, params.artistId, params.albumData, params.ytPlaylistId, params.collection, params.youtubePlaylistId]);
+
+    const detailGeneration = useRef(0);
+    useEffect(() => { detailGeneration.current += 1; return () => { detailGeneration.current += 1; }; }, [params.ytArtistId, params.ytAlbumId, params.ytPlaylistId]);
+    const loadMoreBrowse = async () => {
+        const id = params.ytArtistId ?? params.ytAlbumId ?? params.ytPlaylistId;
+        if (!id || !browseContinuation || loadingMore) return;
+        const generation = detailGeneration.current;
+        const token = browseContinuation;
+        setLoadingMore(true);
+        setLoadError(null);
+        try {
+            const page = await musicBrowse(id, token);
+            if (generation !== detailGeneration.current) return;
+            setTracks(previous => {
+                const seen = new Set(previous.map(track => track.ytVideoId));
+                return [...previous, ...page.songs.filter(song => !seen.has(song.videoId)).map(youtubeTrack)];
+            });
+            setBrowseContinuation(page.continuation === token ? null : page.continuation);
+        } catch { if (generation === detailGeneration.current) setLoadError('Could not load more songs. Try again.'); }
+        finally { if (generation === detailGeneration.current) setLoadingMore(false); }
+    };
 
     const play = useCallback((index = 0) => { if (tracks.length) playPlaylist(tracks, index); }, [tracks, playPlaylist]);
     const shuffle = useCallback(() => {
@@ -210,8 +251,8 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
         playPlaylist(shuffled, 0);
     }, [tracks, playPlaylist]);
 
-    const openArtist = (id?: number, data?: Artist) => { if (id) navigation.push('AlbumDetail', { artistId: id, artistData: data }); };
-    const openAlbum = (item: Album) => navigation.push('AlbumDetail', { albumId: item.id, albumData: item });
+    const openArtist = (id?: number, data?: Artist) => { if (data?.ytBrowseId) navigation.push('AlbumDetail', youtubeBrowseParams(data)); else if (id) navigation.push('AlbumDetail', { artistId: id, artistData: data }); };
+    const openAlbum = (item: Album) => navigation.push('AlbumDetail', item.ytBrowseId ? youtubeBrowseParams(item) : { albumId: item.id, albumData: item });
 
     const coverId = params.youtubePlaylistCover ?? (isArtist ? artist?.picture : isPlaylist ? playlist?.cover : album?.cover);
     const art = coverId ? API.getCoverUrl(coverId, 640) : undefined;
@@ -231,7 +272,7 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
         const time = playtime(tracks);
         if (time) parts.push(time);
         return parts.join(' · ');
-    }, [isArtist, isPlaylist, album, playlist, tracks]);
+    }, [isArtist, isPlaylist, album, playlist, tracks, collection]);
 
     const artHeight = isArtist ? width * ARTIST_PHOTO_RATIO : width;
     const sleeve = Math.min(width * SLEEVE_FRACTION, height * SLEEVE_MAX_HEIGHT);
@@ -409,6 +450,10 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
                         {albumShelf(`More by ${album?.artist?.name || 'this artist'}`, moreByArtist)}
                     </>
                 )}
+                {loadError && <Text accessibilityRole="alert" style={[GX_TYPE.bodyMedium, { color: c.onSurfaceVariant, padding: PAGE_GUTTER }]}>{loadError}</Text>}
+                {!loading && browseContinuation && <TouchableOpacity onPress={loadMoreBrowse} disabled={loadingMore} accessibilityRole="button" style={{ padding: PAGE_GUTTER }}>
+                    <Text style={[GX_TYPE.bodyLarge, { color: c.onBackground }]}>{loadingMore ? 'Loading more…' : 'Load more songs'}</Text>
+                </TouchableOpacity>}
             </ScrollView>
 
             {/* Floating back button over the art */}

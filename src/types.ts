@@ -1,4 +1,5 @@
 export interface Artist {
+    ytBrowseId?: string;
     id: number;
     name: string;
     picture?: string;
@@ -7,6 +8,7 @@ export interface Artist {
 }
 
 export interface Album {
+    ytBrowseId?: string;
     id: number;
     title: string;
     cover: string;
@@ -23,6 +25,7 @@ export interface Album {
 }
 
 export interface Playlist {
+    ytBrowseId?: string;
     id: string;
     title: string;
     cover: string;

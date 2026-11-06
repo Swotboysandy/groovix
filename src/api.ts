@@ -1,8 +1,9 @@
+import { searchTrackScore } from './services/searchRanking';
 import { HIFI_API_URL, TIDAL_SEGMENT_PROXY_URL } from './config/private';
 import { appSettings, loadAppSettings } from './store/appSettings';
 import type { Album, Artist, CatalogSearchResult, Playlist, Track } from './types';
 import CryptoJS from 'crypto-js';
-import { normalizeMusicText, recordingVariant, sameRecording } from './services/musicMatching';
+import { normalizeMusicText, sameRecording } from './services/musicMatching';
 import { catalogRequest, objectRecord } from './services/catalogRequest';
 import { fetchLyrics, LYRICS_SOURCES } from './services/lyrics';
 
@@ -243,34 +244,6 @@ export async function getTidalProxyDashManifest(mpdUrl: string): Promise<string 
         } catch { /* unsupported manifest shape */ }
     }
     return replacements > 0 ? rewritten : null;
-}
-
-function searchTrackScore(query: string, track: Track): number {
-    const wanted = normalizeSongText(query);
-    const title = normalizeSongText(track.title);
-    const artist = normalizeSongText(track.artist?.name || '');
-    const album = normalizeSongText(track.album?.title || '');
-    const words = wanted.split(' ').filter(Boolean);
-    let score = 0;
-    if (title === wanted) score += 120;
-    else if (`${title} ${artist}`.trim() === wanted) score += 110;
-    else if (title.startsWith(wanted)) score += 75;
-    else if (title.includes(wanted)) score += 55;
-    if (artist === wanted) score += 100;
-    else if (artist.startsWith(wanted)) score += 60;
-    else if (artist.includes(wanted)) score += 40;
-    if (album === wanted) score += 35;
-    for (const word of words) {
-        if (title.includes(word)) score += 8;
-        if (artist.includes(word)) score += 6;
-        if (album.includes(word)) score += 2;
-    }
-    score += Math.min(Number(track.popularity) || 0, 100) / 20;
-    if (!recordingVariant(query) && recordingVariant(track.title)) score -= 80;
-    const indiaIntent = /\b(india|indian|hindi|bollywood|punjabi|tamil|telugu|malayalam|kannada|bengali|marathi|gujarati|desi)\b/.test(wanted);
-    const indianContext = `${title} ${artist} ${album}`;
-    if (indiaIntent && /\b(hindi|bollywood|punjabi|tamil|telugu|malayalam|kannada|bengali|marathi|gujarati|desi|india)\b/.test(indianContext)) score += 24;
-    return score;
 }
 
 function indianSearchQueries(query: string): string[] {

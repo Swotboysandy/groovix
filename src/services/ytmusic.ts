@@ -3,7 +3,7 @@
 // Groovix plays TIDAL ids, so every recommendation is matched back onto the
 // TIDAL catalogue before it is shown or queued.
 import { API } from '../api';
-import type { Album, Track } from '../types';
+import type { Album, Artist, Playlist, Track, CatalogSearchResult } from '../types';
 import { bestRecording, looseSameRecording, normalizeMusicText } from './musicMatching';
 export { mapConcurrent } from './asyncTools';
 
@@ -12,9 +12,9 @@ const WEB_REMIX_VERSION = '1.20250101.01.00';
 const WEB_REMIX_CLIENT_ID = '67';
 const TIMEOUT_MS = 12000;
 /** Songs-only search filter, as the web client sends it. */
-const SONGS_FILTER = 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D';
+const SONGS_FILTER = 'EgWKAQIIAWoKEAkQChAFEAMQBA==';
 
-export type YtSong = { videoId: string; title: string; artist: string; album?: string; durationSec?: number; thumbnail?: string };
+export type YtSong = { videoId: string; title: string; artist: string; album?: string; artistBrowseId?: string; albumBrowseId?: string; durationSec?: number; thumbnail?: string };
 export type YtAlbum = { browseId: string; title: string; artist: string; thumbnail?: string };
 export type YtShelf =
     | { title: string; kind: 'songs'; items: YtSong[] }
@@ -81,7 +81,7 @@ function songFromListItem(renderer: any): YtSong | null {
     const albumRun = second.find((run: any) => run?.navigationEndpoint?.browseEndpoint?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType === 'MUSIC_PAGE_TYPE_ALBUM');
     const artist = artistRuns.length ? artistRuns.map((run: any) => run.text).join(', ') : artistFromSubtitle(byline);
     const durationText = byline.split(' • ').map(part => part.trim()).find(part => /^\d+(:\d+)+$/.test(part));
-    return { videoId, title, artist, album: albumRun?.text, durationSec: parseDuration(durationText), thumbnail: bestThumbnail(renderer?.thumbnail) };
+    return { videoId, title, artist, album: albumRun?.text, artistBrowseId: artistRuns[0]?.navigationEndpoint?.browseEndpoint?.browseId, albumBrowseId: albumRun?.navigationEndpoint?.browseEndpoint?.browseId, durationSec: parseDuration(durationText) ?? parseDuration(runsText(renderer?.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text)), thumbnail: bestThumbnail(renderer?.thumbnail) };
 }
 
 function albumFromTwoRow(renderer: any): YtAlbum | null {
@@ -146,6 +146,133 @@ function parseWatchQueue(response: any): YtSong[] {
 }
 
 // ---- YtMusicRepository ----------------------------------------------------
+
+export type YtSearchPage = { tracks: Track[]; continuation: string | null };
+
+/** Search shelves only: never treat menu/watch/recommendation renderers as hits. */
+export function parseSongSearch(response: any): YtSearchPage {
+    const page = parseMusicSearch(response);
+    return { tracks: page.tracks, continuation: page.continuation };
+}
+
+/** BitChord's song search: provider relevance, stable video ids, lazy playback resolution. */
+export async function searchSongs(query: string, continuation?: string): Promise<YtSearchPage> {
+    if (!query.trim() && !continuation) return { tracks: [], continuation: null };
+    return parseSongSearch(await post('search', continuation
+        ? { continuation }
+        : { query: query.trim(), params: SONGS_FILTER }));
+}
+
+export type SearchCategory = 'all' | 'songs' | 'albums' | 'artists' | 'playlists';
+export const SEARCH_FILTERS: Record<SearchCategory, string | null> = {
+    all: null, songs: SONGS_FILTER,
+    albums: 'EgWKAQIYAWoKEAkQChAFEAMQBA==',
+    artists: 'EgWKAQIgAWoKEAkQChAFEAMQBA==',
+    playlists: 'EgWKAQIoAWoKEAkQChAFEAMQBA==',
+};
+export type MusicSearchPage = CatalogSearchResult & { continuation: string | null; topBrowse?: Album | Artist | Playlist };
+
+function browseSearchItem(renderer: any): { kind: 'albums' | 'artists' | 'playlists'; item: Album | Artist | Playlist } | null {
+    const titleNode = renderer?.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer?.text ?? renderer?.title;
+    const subtitleNode = renderer?.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer?.text ?? renderer?.subtitle;
+    const endpoint = renderer?.navigationEndpoint?.browseEndpoint
+        ?? titleNode?.runs?.find((run: any) => run.navigationEndpoint?.browseEndpoint)?.navigationEndpoint?.browseEndpoint;
+    const browseId = endpoint?.browseId;
+    const title = runsText(titleNode);
+    if (!browseId || !title) return null;
+    const pageType = endpoint.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType;
+    const cover = bestThumbnail(renderer.thumbnail ?? renderer.thumbnailRenderer) ?? '';
+    const subtitle = runsText(subtitleNode);
+    const base = { id: youtubeTrackId(browseId), ytBrowseId: browseId };
+    if (pageType === 'MUSIC_PAGE_TYPE_ARTIST' || browseId.startsWith('UC')) {
+        return { kind: 'artists', item: { ...base, name: title, picture: cover } };
+    }
+    if (pageType === 'MUSIC_PAGE_TYPE_ALBUM' || browseId.startsWith('MPRE')) {
+        return { kind: 'albums', item: { ...base, title, cover, artist: { id: 0, name: artistFromSubtitle(subtitle) } } };
+    }
+    if (pageType === 'MUSIC_PAGE_TYPE_PLAYLIST' || browseId.startsWith('VL')) {
+        return { kind: 'playlists', item: { ...base, id: browseId, title, cover, creatorName: artistFromSubtitle(subtitle), numberOfTracks: 0, duration: 0 } };
+    }
+    return null;
+}
+
+/** Only visible result containers are traversed; menu/watch endpoints aren't results. */
+export function parseMusicSearch(response: any): MusicSearchPage {
+    const page: MusicSearchPage = { tracks: [], albums: [], artists: [], playlists: [], continuation: null };
+    const seen = new Set<string>();
+    const add = (renderer: any) => {
+        const browse = browseSearchItem(renderer);
+        if (browse) {
+            const key = `b:${browse.item.ytBrowseId}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            if (browse.kind === 'albums') page.albums.push(browse.item as Album);
+            else if (browse.kind === 'artists') page.artists.push(browse.item as Artist);
+            else page.playlists.push(browse.item as Playlist);
+            return;
+        }
+        // Skip music-video uploads in the music search, matching BitChord.
+        const watch = renderer?.navigationEndpoint?.watchEndpoint
+            ?? renderer?.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint;
+        const videoType = watch?.watchEndpointMusicSupportedConfigs?.watchEndpointMusicConfig?.musicVideoType;
+        if (videoType && videoType !== 'MUSIC_VIDEO_TYPE_ATV') return;
+        const song = songFromListItem(renderer);
+        if (!song || seen.has(`v:${song.videoId}`)) return;
+        seen.add(`v:${song.videoId}`);
+        page.tracks.push(youtubeTrack(song));
+    };
+    const walk = (items: any[]) => {
+        for (const item of items ?? []) {
+            if (item.itemSectionRenderer) walk(item.itemSectionRenderer.contents);
+            const card = item.musicCardShelfRenderer;
+            if (card) {
+                const promoted = browseSearchItem(card);
+                if (promoted) page.topBrowse = promoted.item;
+                const endpoint = card.navigationEndpoint ?? card.title?.runs?.[0]?.navigationEndpoint ?? card.onTap;
+                add({ ...card, navigationEndpoint: endpoint,
+                    playlistItemData: { videoId: endpoint?.watchEndpoint?.videoId },
+                    flexColumns: [card.title, card.subtitle].map(text => ({ musicResponsiveListItemFlexColumnRenderer: { text } })),
+                });
+                walk(card.contents);
+            }
+            if (item.musicResponsiveListItemRenderer) add(item.musicResponsiveListItemRenderer);
+            if (item.musicTwoRowItemRenderer) add(item.musicTwoRowItemRenderer);
+            const shelf = item.musicShelfRenderer ?? item.musicPlaylistShelfRenderer ?? item.musicCarouselShelfRenderer ?? item.gridRenderer;
+            if (shelf) {
+                walk(shelf.contents ?? shelf.items);
+                page.continuation = shelf.continuations?.[0]?.nextContinuationData?.continuation ?? page.continuation;
+            }
+            page.continuation = item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token ?? page.continuation;
+        }
+    };
+    const sections = response?.contents?.tabbedSearchResultsRenderer?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents;
+    walk(sections);
+    const continued = response?.continuationContents?.musicShelfContinuation ?? response?.continuationContents?.sectionListContinuation;
+    if (continued) {
+        walk(continued.contents);
+        page.continuation = continued.continuations?.[0]?.nextContinuationData?.continuation ?? page.continuation;
+    }
+    for (const action of response?.onResponseReceivedCommands ?? response?.onResponseReceivedActions ?? []) {
+        walk(action.appendContinuationItemsAction?.continuationItems);
+    }
+    return page;
+}
+
+export async function searchMusic(query: string, category: SearchCategory = 'all', continuation?: string): Promise<MusicSearchPage> {
+    if (!query.trim() && !continuation) return parseMusicSearch({});
+    return parseMusicSearch(await post('search', continuation ? { continuation }
+        : { query: query.trim(), ...(SEARCH_FILTERS[category] ? { params: SEARCH_FILTERS[category] } : {}) }));
+}
+
+/** Keep browse identity intact: never send a YouTube hash/id to a TIDAL detail API. */
+export function youtubeBrowseParams(item: Album | Artist | Playlist): Record<string, unknown> {
+    if (!item.ytBrowseId) throw new Error('Missing YouTube browse identity');
+    if ('name' in item) return { ytArtistId: item.ytBrowseId, artistData: item };
+    if (typeof item.id === 'string') return { ytPlaylistId: item.ytBrowseId, ytPlaylistData: {
+        browseId: item.ytBrowseId, title: item.title, subtitle: ('creatorName' in item ? item.creatorName : '') ?? '', thumbnail: item.cover,
+    } };
+    return { ytAlbumId: item.ytBrowseId, albumData: item };
+}
 
 /** The first song hit for [query] — how a TIDAL seed finds its YouTube id. */
 export async function searchSong(query: string): Promise<YtSong | null> {
@@ -273,30 +400,73 @@ export function moodPlaylists(mood: Pick<YtMood, 'browseId' | 'params'>): Promis
     return pending;
 }
 
-/** A YouTube Music playlist's header and songs. */
-export async function playlistSongs(browseId: string): Promise<{ title: string; thumbnail?: string; songs: YtSong[] }> {
-    const response = await post('browse', { browseId });
+export type MusicBrowsePage = {
+    title: string; thumbnail?: string; songs: YtSong[]; albums: Album[]; continuation: string | null; songsBrowseId?: string;
+};
+
+/** Shared browse parser for albums, artist pages and playlists. */
+export function parseMusicBrowse(response: any): MusicBrowsePage {
     const columns = response?.contents?.twoColumnBrowseResultsRenderer;
-    const header = columns?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]?.musicResponsiveHeaderRenderer;
-    const headerThumbnail = bestThumbnail(header?.thumbnail?.musicThumbnailRenderer ?? header?.thumbnail);
-    const headerArtist = runsText(header?.straplineTextOne);
-    const songs: YtSong[] = [];
-    for (const section of columns?.secondaryContents?.sectionListRenderer?.contents ?? []) {
-        const shelf = section?.musicPlaylistShelfRenderer ?? section?.musicShelfRenderer;
-        for (const item of shelf?.contents ?? []) {
-            const renderer = item?.musicResponsiveListItemRenderer;
+    const primary = columns?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents
+        ?? browseSections(response);
+    const sections = [...(primary ?? []), ...(columns?.secondaryContents?.sectionListRenderer?.contents ?? [])];
+    const header = response?.header?.musicImmersiveHeaderRenderer
+        ?? response?.header?.musicVisualHeaderRenderer
+        ?? response?.header?.musicDetailHeaderRenderer
+        ?? sections.find((section: any) => section.musicResponsiveHeaderRenderer)?.musicResponsiveHeaderRenderer;
+    const continued = response?.continuationContents?.musicPlaylistShelfContinuation
+        ?? response?.continuationContents?.musicShelfContinuation;
+    if (continued) sections.push({ musicPlaylistShelfRenderer: continued });
+    const page: MusicBrowsePage = {
+        title: runsText(header?.title),
+        thumbnail: bestThumbnail(header?.thumbnail) ?? bestThumbnail(header?.foregroundThumbnail),
+        songs: [], albums: [], continuation: null,
+    };
+    const artist = runsText(header?.straplineTextOne) || artistFromSubtitle(runsText(header?.subtitle));
+    const seen = new Set<string>();
+    for (const section of sections) {
+        const shelf = section.musicPlaylistShelfRenderer ?? section.musicShelfRenderer ?? section.musicCarouselShelfRenderer ?? section.gridRenderer;
+        if (!shelf) continue;
+        const songEndpoint = shelf.bottomEndpoint?.browseEndpoint?.browseId;
+        if (section.musicShelfRenderer && songEndpoint) page.songsBrowseId = songEndpoint;
+        for (const item of shelf.contents ?? shelf.items ?? []) {
+            const renderer = item.musicResponsiveListItemRenderer ?? item.musicTwoRowItemRenderer;
+            const browse = browseSearchItem(renderer);
+            if (browse) {
+                if (browse.kind === 'albums' && !seen.has(`b:${browse.item.ytBrowseId}`)) {
+                    seen.add(`b:${browse.item.ytBrowseId}`); page.albums.push(browse.item as Album);
+                }
+                continue;
+            }
             const song = songFromListItem(renderer);
-            if (!song) continue;
-            const fixed = runsText(renderer?.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text);
-            songs.push({
-                ...song,
-                artist: song.artist || headerArtist,
-                thumbnail: song.thumbnail ?? headerThumbnail,
-                durationSec: song.durationSec ?? parseDuration(fixed),
-            });
+            if (song && !seen.has(`v:${song.videoId}`)) {
+                seen.add(`v:${song.videoId}`);
+                page.songs.push({ ...song, artist: song.artist || artist || page.title, thumbnail: song.thumbnail ?? page.thumbnail });
+            }
+            page.continuation = item.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token ?? page.continuation;
         }
+        page.continuation = shelf.continuations?.[0]?.nextContinuationData?.continuation ?? page.continuation;
     }
-    return { title: runsText(header?.title), thumbnail: headerThumbnail, songs };
+    for (const action of response?.onResponseReceivedActions ?? []) {
+        const parsed = parseMusicBrowse({ continuationContents: { musicPlaylistShelfContinuation: { contents: action.appendContinuationItemsAction?.continuationItems ?? [] } } });
+        page.songs.push(...parsed.songs); page.continuation = parsed.continuation ?? page.continuation;
+    }
+    return page;
+}
+
+export async function musicBrowse(browseId: string, continuation?: string): Promise<MusicBrowsePage> {
+    const page = parseMusicBrowse(await post('browse', continuation ? { continuation } : { browseId }));
+    if (!continuation && browseId.startsWith('UC') && page.songsBrowseId) {
+        // Artist pages contain only a short preview; follow the authoritative Songs link.
+        const songs = parseMusicBrowse(await post('browse', { browseId: page.songsBrowseId }));
+        if (songs.songs.length) { page.songs = songs.songs; page.continuation = songs.continuation; }
+    }
+    return page;
+}
+
+/** Compatibility for existing Home / Explore entry points. */
+export async function playlistSongs(browseId: string): Promise<MusicBrowsePage> {
+    return musicBrowse(browseId);
 }
 
 // ---- YouTube songs as tracks ----------------------------------------------
@@ -325,8 +495,8 @@ export function youtubeTrack(song: YtSong): Track {
         id: youtubeTrackId(song.videoId),
         title: song.title,
         duration: song.durationSec ?? 0,
-        artist: { id: 0, name: song.artist },
-        album: { id: 0, title: song.album ?? '', cover },
+        artist: { id: song.artistBrowseId ? youtubeTrackId(song.artistBrowseId) : 0, name: song.artist, ytBrowseId: song.artistBrowseId },
+        album: { id: song.albumBrowseId ? youtubeTrackId(song.albumBrowseId) : 0, title: song.album ?? '', cover, ytBrowseId: song.albumBrowseId },
         coverUrl: cover,
         ytVideoId: song.videoId,
     };

@@ -1,3 +1,4 @@
+import { musicBrowse, youtubeTrack, youtubeBrowseParams } from '../services/ytmusic';
 // HeldContextMenu: the screen blurs behind the held item,
 // the item is lifted into view, and a rounded menu of actions sits beneath it
 // with the label on the left and the glyph on the right.
@@ -62,7 +63,7 @@ export function SongMenuProvider({ children }: { children: React.ReactNode }) {
         if (!keepOpen) close();
     };
 
-    const albumTracks = async (album: Album) => (await API.getAlbum(album.id)).tracks;
+    const albumTracks = async (album: Album) => album.ytBrowseId ? (await musicBrowse(album.ytBrowseId)).songs.map(youtubeTrack) : (await API.getAlbum(album.id)).tracks;
 
     const actions: Action[] = !target ? [] : target.kind === 'track' ? [
         { label: 'Play', icon: glyph('play'), onPress: run(() => playTrack(target.track)) },
@@ -81,15 +82,15 @@ export function SongMenuProvider({ children }: { children: React.ReactNode }) {
                 }
             }, true),
         },
-        ...(target.track.album?.id ? [{ label: 'Open album', icon: glyph('chevron-forward'), onPress: run(() => navigation.navigate('AlbumDetail', { albumId: target.track.album!.id, albumData: target.track.album })) }] : []),
-        ...(target.track.artist?.id ? [{ label: 'Open artist', icon: glyph('person-outline'), onPress: run(() => navigation.navigate('AlbumDetail', { artistId: target.track.artist.id, artistData: target.track.artist })) }] : []),
+        ...(target.track.album?.id ? [{ label: 'Open album', icon: glyph('chevron-forward'), onPress: run(() => navigation.navigate('AlbumDetail', target.track.album.ytBrowseId ? youtubeBrowseParams(target.track.album) : { albumId: target.track.album!.id, albumData: target.track.album })) }] : []),
+        ...(target.track.artist?.id ? [{ label: 'Open artist', icon: glyph('person-outline'), onPress: run(() => navigation.navigate('AlbumDetail', target.track.artist.ytBrowseId ? youtubeBrowseParams(target.track.artist) : { artistId: target.track.artist.id, artistData: target.track.artist })) }] : []),
         { label: 'Share', icon: glyph('share-social-outline'), onPress: run(() => { Share.share({ message: `${target.track.title} — ${target.track.artist?.name ?? ''}` }); }) },
     ] : [
         { label: 'Play', icon: glyph('play'), onPress: run(async () => { const tracks = await albumTracks(target.album); if (tracks.length) playPlaylist(tracks, 0); }) },
         { label: 'Shuffle', icon: glyph('shuffle'), onPress: run(async () => { const tracks = (await albumTracks(target.album)).sort(() => Math.random() - 0.5); if (tracks.length) playPlaylist(tracks, 0); }) },
         { label: 'Play next', icon: mglyph('playlist-play'), onPress: run(async () => { const tracks = await albumTracks(target.album); tracks.slice().reverse().forEach(playNextInQueue); }) },
         { label: 'Add to queue', icon: mglyph('playlist-music'), onPress: run(async () => { (await albumTracks(target.album)).forEach(addToQueue); }) },
-        { label: 'Open album', icon: glyph('chevron-forward'), onPress: run(() => navigation.navigate('AlbumDetail', { albumId: target.album.id, albumData: target.album })) },
+        { label: 'Open album', icon: glyph('chevron-forward'), onPress: run(() => navigation.navigate('AlbumDetail', target.album.ytBrowseId ? youtubeBrowseParams(target.album) : { albumId: target.album.id, albumData: target.album })) },
         { label: 'Share', icon: glyph('share-social-outline'), onPress: run(() => { Share.share({ message: `${target.album.title} — ${target.album.artist?.name ?? ''}` }); }) },
     ];
 

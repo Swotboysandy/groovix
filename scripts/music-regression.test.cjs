@@ -355,3 +355,341 @@ test('all source TypeScript and TSX parse without emitting files', () => {
         assert.equal(errors.length, 0, `${file}: ${errors.map(error => ts.flattenDiagnosticMessageText(error.messageText, ' ')).join('; ')}`);
     }
 });
+
+test('search ranks full title and artist above partial matches and unwanted versions', () => {
+    const { searchTrackScore, matchesSearch } = loader()('src/services/searchRanking.ts');
+    const correct = track(1, 'Tum Hi Ho', 'Arijit Singh');
+    const wrong = track(2, 'Tum Hi Ho', 'Someone Else');
+    const remix = track(3, 'Tum Hi Ho Remix', 'Arijit Singh');
+    assert.ok(searchTrackScore('tum hi ho arijit', correct) > searchTrackScore('tum hi ho arijit', wrong));
+    assert.ok(searchTrackScore('tum hi ho', correct) > searchTrackScore('tum hi ho', remix));
+    assert.ok(searchTrackScore('tum hi ho remix', remix) > searchTrackScore('tum hi ho remix', correct));
+    assert.ok(matchesSearch('Tum Hi Ho Arijit Singh', 'arijit tum hi'));
+    assert.ok(matchesSearch('अरिजीत सिंह तुम ही हो', 'तुम अरिजीत'));
+    assert.equal(matchesSearch('Heartless', 'art'), false);
+    assert.equal(matchesSearch('Anything', '  '), false);
+});
+
+
+function searchRow(videoId, title, artist = 'Arijit Singh') {
+    return { musicResponsiveListItemRenderer: {
+        playlistItemData: { videoId },
+        flexColumns: [
+            { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: title }] } } },
+            { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: `${artist} • Album • 3:20` }] } } },
+        ],
+    } };
+}
+
+test('BitChord song search preserves provider order and deduplicates by video id', async () => {
+    let body;
+    const { searchSongs } = loader({ '../api': { API: {} } }, { fetch: async (_url, options) => {
+        body = JSON.parse(options.body);
+        return new Response(JSON.stringify({ contents: { tabbedSearchResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [
+            { musicShelfRenderer: { contents: [searchRow('first', 'Provider first'), searchRow('second', 'Exact query'), searchRow('first', 'Duplicate')], continuations: [{ nextContinuationData: { continuation: 'page-2' } }] } },
+        ] } } } }] } } }));
+    } })('src/services/ytmusic.ts');
+    const page = await searchSongs('Exact query');
+    assert.equal(body.params, 'EgWKAQIIAWoKEAkQChAFEAMQBA==');
+    assert.equal(body.context.client.clientName, 'WEB_REMIX');
+    assert.deepEqual(Array.from(page.tracks, item => item.ytVideoId), ['first', 'second']);
+    assert.ok(page.tracks.every(item => item.id < 0));
+    assert.equal(page.tracks[0].duration, 200);
+    assert.equal(page.continuation, 'page-2');
+});
+
+test('BitChord continuation parses the next shelf and excludes nested menu tracks', async () => {
+    let body;
+    const { searchSongs } = loader({ '../api': { API: {} } }, { fetch: async (_url, options) => {
+        body = JSON.parse(options.body);
+        return new Response(JSON.stringify({ continuationContents: { musicShelfContinuation: {
+            contents: [searchRow('third', 'Next song')],
+            menu: { contents: [searchRow('wrong', 'Not a result')] },
+        } } }));
+    } })('src/services/ytmusic.ts');
+    const page = await searchSongs('query', 'page-2');
+    assert.equal(body.continuation, 'page-2');
+    assert.equal(body.query, undefined);
+    assert.deepEqual(Array.from(page.tracks, item => item.ytVideoId), ['third']);
+    assert.equal(page.continuation, null);
+});
+
+test('YouTube song search propagates outages rather than caching a false empty result', async () => {
+    const { searchSongs } = loader({ '../api': { API: {} } }, { fetch: async () => new Response('', { status: 503 }) })('src/services/ytmusic.ts');
+    await assert.rejects(searchSongs('test'), /503/);
+    assert.equal((await searchSongs('  ')).tracks.length, 0);
+});
+
+function browseRow(kind, id, title) {
+    return { musicResponsiveListItemRenderer: {
+        navigationEndpoint: { browseEndpoint: { browseId: id, browseEndpointContextSupportedConfigs: {
+            browseEndpointContextMusicConfig: { pageType: `MUSIC_PAGE_TYPE_${kind}` },
+        } } },
+        // Album overlays can carry a song id. Browse classification must win.
+        playlistItemData: { videoId: 'overlay-not-a-track' },
+        flexColumns: [
+            { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: title }] } } },
+            { musicResponsiveListItemFlexColumnRenderer: { text: { runs: [{ text: `${kind} • Test Artist` }] } } },
+        ],
+    } };
+}
+function searchResponse(items, token) {
+    return { contents: { tabbedSearchResultsRenderer: { tabs: [{ tabRenderer: { content: {
+        sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [{ musicShelfRenderer: {
+            contents: items, ...(token ? { continuations: [{ nextContinuationData: { continuation: token } }] } : {}),
+        } }] } }] },
+    } } }] } } };
+}
+
+test('mixed BitChord search parses nested albums, artists and playlists before their play overlays', () => {
+    const { parseMusicSearch } = loader({ '../api': { API: {} } })('src/services/ytmusic.ts');
+    const response = searchResponse([
+        browseRow('ALBUM', 'MPRE-album', 'Album'), browseRow('ARTIST', 'UC-artist', 'Artist'),
+        browseRow('PLAYLIST', 'VL-playlist', 'Playlist'), searchRow('song', 'Song'),
+        browseRow('ALBUM', 'MPRE-album', 'Duplicate album'),
+    ]);
+    const result = parseMusicSearch(response);
+    assert.equal(result.tracks.length, 1);
+    assert.equal(result.albums.length, 1);
+    assert.equal(result.artists.length, 1);
+    assert.equal(result.playlists.length, 1);
+    assert.equal(result.albums[0].ytBrowseId, 'MPRE-album');
+    assert.equal(result.playlists[0].id, 'VL-playlist');
+});
+
+test('every BitChord filter sends the correct params; All stays unfiltered and anonymous', async () => {
+    const bodies = [];
+    const { searchMusic, SEARCH_FILTERS } = loader({ '../api': { API: {} } }, { fetch: async (_url, options) => {
+        assert.equal(options.headers.Cookie, undefined);
+        bodies.push(JSON.parse(options.body));
+        return new Response(JSON.stringify(searchResponse([])));
+    } })('src/services/ytmusic.ts');
+    for (const category of ['all', 'songs', 'albums', 'artists', 'playlists']) {
+        await searchMusic('query', category);
+        assert.equal(bodies.at(-1).params ?? null, SEARCH_FILTERS[category]);
+    }
+    assert.equal(bodies[2].params, 'EgWKAQIYAWoKEAkQChAFEAMQBA==');
+    assert.equal(bodies[3].params, 'EgWKAQIgAWoKEAkQChAFEAMQBA==');
+    assert.equal(bodies[4].params, 'EgWKAQIoAWoKEAkQChAFEAMQBA==');
+});
+
+test('browse identity and provider order survive same-name results and category continuations', async () => {
+    let body;
+    const { searchMusic } = loader({ '../api': { API: {} } }, { fetch: async (_url, options) => {
+        body = JSON.parse(options.body);
+        return new Response(JSON.stringify({ continuationContents: { musicShelfContinuation: {
+            contents: [browseRow('ALBUM', 'MPRE-second', 'Same title'), browseRow('ALBUM', 'MPRE-first', 'Same title')],
+            continuations: [{ nextContinuationData: { continuation: 'next' } }],
+        } } }));
+    } })('src/services/ytmusic.ts');
+    const result = await searchMusic('query', 'albums', 'token');
+    assert.equal(body.continuation, 'token');
+    assert.equal(body.params, undefined);
+    assert.deepEqual(Array.from(result.albums, item => item.ytBrowseId), ['MPRE-second', 'MPRE-first']);
+    assert.equal(result.continuation, 'next');
+});
+
+test('YouTube browse routes never pass negative hashes into catalog detail IDs', () => {
+    const { parseMusicSearch, youtubeBrowseParams } = loader({ '../api': { API: {} } })('src/services/ytmusic.ts');
+    const page = parseMusicSearch(searchResponse([browseRow('ALBUM', 'MPRE-a', 'Album'), browseRow('ARTIST', 'UC-a', 'Artist'), browseRow('PLAYLIST', 'VL-a', 'Playlist')]));
+    const album = youtubeBrowseParams(page.albums[0]);
+    const artist = youtubeBrowseParams(page.artists[0]);
+    const playlist = youtubeBrowseParams(page.playlists[0]);
+    assert.equal(album.ytAlbumId, 'MPRE-a'); assert.equal(album.albumId, undefined);
+    assert.equal(artist.ytArtistId, 'UC-a'); assert.equal(artist.artistId, undefined);
+    assert.equal(playlist.ytPlaylistId, 'VL-a'); assert.equal(playlist.playlistId, undefined);
+});
+
+test('promoted artist cards stay the Top result rather than becoming an unrelated top song', () => {
+    const { parseMusicSearch } = loader({ '../api': { API: {} } })('src/services/ytmusic.ts');
+    const row = browseRow('ARTIST', 'UC-top', 'Top Artist').musicResponsiveListItemRenderer;
+    const card = { title: row.flexColumns[0].musicResponsiveListItemFlexColumnRenderer.text, navigationEndpoint: row.navigationEndpoint, contents: [searchRow('preview', 'Preview song')] };
+    const response = searchResponse([]);
+    response.contents.tabbedSearchResultsRenderer.tabs[0].tabRenderer.content.sectionListRenderer.contents.unshift({ musicCardShelfRenderer: card });
+    const page = parseMusicSearch(response);
+    assert.equal(page.topBrowse.name, 'Top Artist');
+    assert.equal(page.artists[0].ytBrowseId, 'UC-top');
+    assert.equal(page.tracks[0].ytVideoId, 'preview');
+});
+
+test('album/playlist browse preserves order, durations, continuation and excludes recommendations as songs', () => {
+    const { parseMusicBrowse } = loader({ '../api': { API: {} } })('src/services/ytmusic.ts');
+    const page = parseMusicBrowse({ contents: { twoColumnBrowseResultsRenderer: {
+        tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents: [{ musicResponsiveHeaderRenderer: { title: { runs: [{ text: 'Release' }] } } }] } } } }],
+        secondaryContents: { sectionListRenderer: { contents: [{ musicPlaylistShelfRenderer: { contents: [searchRow('a', 'First'), searchRow('b', 'Second'), browseRow('ALBUM', 'MPRE-other', 'Other album')], continuations: [{ nextContinuationData: { continuation: 'more' } }] } }] } },
+    } } });
+    assert.equal(page.title, 'Release');
+    assert.deepEqual(Array.from(page.songs, song => song.videoId), ['a', 'b']);
+    assert.equal(page.songs[0].durationSec, 200);
+    assert.equal(page.continuation, 'more');
+});
+
+test('artist browse follows the authoritative Songs playlist before exposing its tracks', async () => {
+    const requested = [];
+    const { musicBrowse } = loader({ '../api': { API: {} } }, { fetch: async (_url, options) => {
+        const body = JSON.parse(options.body); requested.push(body.browseId);
+        const contents = body.browseId === 'UC-artist'
+            ? [{ musicShelfRenderer: { contents: [searchRow('preview', 'Preview')], bottomEndpoint: { browseEndpoint: { browseId: 'VL-top-songs' } } } }]
+            : [{ musicShelfRenderer: { contents: [searchRow('full-a', 'First'), searchRow('full-b', 'Second')] } }];
+        return new Response(JSON.stringify({ contents: { singleColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { content: { sectionListRenderer: { contents } } } }] } } }));
+    } })('src/services/ytmusic.ts');
+    const page = await musicBrowse('UC-artist');
+    assert.deepEqual(requested, ['UC-artist', 'VL-top-songs']);
+    assert.deepEqual(Array.from(page.songs, song => song.videoId), ['full-a', 'full-b']);
+});
+
+// Execute the real search screen's handlers with inert native views. No device,
+// Metro or browser is needed; async provider results remain controllable.
+function searchScreenHarness(searchMusic) {
+    const slots = []; let cursor = 0;
+    const react = {
+        createElement: (type, props, ...children) => ({ type, props: { ...props, children } }),
+        useState(initial) { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }]; },
+        useRef(initial) { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index]; },
+        useMemo: fn => fn(), useCallback: fn => fn, useEffect: () => {},
+    };
+    const native = Object.fromEntries(['View', 'Text', 'TextInput', 'TouchableOpacity', 'Image', 'ScrollView'].map(name => [name, name]));
+    native.StyleSheet = { create: value => value }; native.Keyboard = { dismiss() {} };
+    const noOp = () => {};
+    const navigation = { navigate: noOp, setParams: noOp };
+    const load = loader({
+        react, 'react-native': native,
+        '@react-navigation/native': { useNavigation: () => navigation, useRoute: () => ({ params: {} }), useFocusEffect: noOp },
+        'react-native-safe-area-context': { SafeAreaView: 'SafeAreaView' },
+        'react-native-vector-icons/Ionicons': 'Icon',
+        '../services/haptics': { haptic: noOp },
+        '../components/GlassHeader': { ProfileCircle: 'ProfileCircle' },
+        '../components/SongMenu': { useSongMenu: () => noOp },
+        '../services/search': { searchWithPlaybackFallback: async (...args) => ({ ...await searchMusic(...args), provider: 'youtube' }) },
+        '../services/ytmusic': { searchMusic, searchSuggestions: async () => [], youtubeBrowseParams: item => ({ ytAlbumId: item.ytBrowseId }) },
+        '../api': { API: { getCoverUrl: value => value } },
+        '../store/searchHistory': {}, '../store/listeningProfile': {}, '../store/preferences': {},
+        '../context/PlayerContext': { usePlayerSummary: () => ({ playTrack: noOp, addToQueue: noOp }) },
+        '../context/ThemeContext': { useTheme: () => ({ colors: {}, theme: 'dark' }) },
+        '../context/DialogContext': { useAppDialog: () => ({ showDialog: noOp }) },
+        '../services/recommendations': { getRadioRecommendations: async () => [] },
+        '../hooks/useScreenStatusBar': { useScreenStatusBar: noOp },
+        '../components/SkeletonPulse': 'SkeletonPulse',
+    });
+    const Screen = load('src/screens/TrackList.tsx').default;
+    const render = () => { cursor = 0; return Screen(); };
+    const nodes = (node, found = []) => {
+        if (Array.isArray(node)) node.forEach(item => nodes(item, found));
+        else if (node && typeof node === 'object') { found.push(node); nodes(node.props?.children, found); }
+        return found;
+    };
+    const text = node => {
+        if (Array.isArray(node)) return node.map(text).join('');
+        if (node && typeof node === 'object') return text(node.props?.children);
+        return node == null || typeof node === 'boolean' ? '' : String(node);
+    };
+    return { render, nodes, text };
+}
+const emptySearch = () => ({ tracks: [], albums: [], artists: [], playlists: [], continuation: null });
+
+test('real search-screen tabs request their own BitChord filter instead of filtering the Songs page', async () => {
+    const calls = [];
+    const h = searchScreenHarness(async (query, category) => { calls.push([query, category]); return emptySearch(); });
+    let tree = h.render();
+    h.nodes(tree).find(node => node.type === 'TextInput').props.onChangeText('query');
+    tree = h.render();
+    await h.nodes(tree).find(node => node.props?.accessibilityLabel === 'Search').props.onPress();
+    for (const [label, expected] of [['Albums', 'albums'], ['Artists', 'artists'], ['Playlists', 'playlists'], ['Songs', 'songs'], ['All', 'all']]) {
+        tree = h.render();
+        const tab = h.nodes(tree).find(node => node.type === 'TouchableOpacity' && node.props.accessibilityState && h.text(node) === label);
+        assert.ok(tab, `${label} tab exists`);
+        tab.props.onPress(); await delay(0);
+        assert.deepEqual(calls.at(-1), ['query', expected]);
+    }
+});
+
+test('real search screen ignores an older category response and clearing invalidates pending results', async () => {
+    const pending = [];
+    const h = searchScreenHarness((query, category) => new Promise(resolve => pending.push({ query, category, resolve })));
+    let tree = h.render();
+    h.nodes(tree).find(node => node.type === 'TextInput').props.onChangeText('query');
+    tree = h.render();
+    const first = h.nodes(tree).find(node => node.props?.accessibilityLabel === 'Search').props.onPress();
+    tree = h.render();
+    const albumTab = h.nodes(tree).find(node => node.type === 'TouchableOpacity' && node.props.accessibilityState && h.text(node) === 'Albums');
+    albumTab.props.onPress();
+    pending[1].resolve({ ...emptySearch(), albums: [{ id: -1, ytBrowseId: 'MPRE-new', title: 'Current album', cover: '' }] });
+    await delay(0);
+    pending[0].resolve({ ...emptySearch(), albums: [{ id: -2, ytBrowseId: 'MPRE-old', title: 'Stale album', cover: '' }] });
+    await first;
+    tree = h.render();
+    assert.ok(h.text(tree).includes('Current album'));
+    assert.ok(!h.text(tree).includes('Stale album'));
+    h.nodes(tree).find(node => node.props?.accessibilityLabel === 'Search').props.onPress();
+    tree = h.render();
+    h.nodes(tree).find(node => node.props?.accessibilityLabel === 'Clear search').props.onPress();
+    pending[2].resolve({ ...emptySearch(), albums: [{ id: -3, title: 'Late album', cover: '' }] });
+    await delay(0);
+    tree = h.render();
+    assert.ok(!h.text(tree).includes('Late album'));
+    assert.equal(h.nodes(tree).find(node => node.type === 'TextInput').props.value, '');
+});
+
+test('successful BitChord results retain their ranking without querying the playback catalog', async () => {
+    let catalogCalls = 0;
+    const { searchWithPlaybackFallback } = loader({
+        './ytmusic': { searchMusic: async () => ({ ...emptySearch(), tracks: [track(2), track(1)] }) },
+        '../api': { API: { search: async () => { catalogCalls++; return []; } } },
+    })('src/services/search.ts');
+    const page = await searchWithPlaybackFallback('query');
+    assert.equal(page.provider, 'youtube');
+    assert.deepEqual(Array.from(page.tracks, item => item.id), [2, 1]);
+    assert.equal(catalogCalls, 0);
+});
+
+test('playback catalog searches all types on a YouTube outage and preserves real playback identities', async () => {
+    const source = track(421, 'Playable song');
+    const { searchWithPlaybackFallback } = loader({
+        './ytmusic': { searchMusic: async () => { throw new Error('YouTube offline'); } },
+        '../api': { API: {
+            search: async () => [source],
+            searchAlbums: async () => [{ id: 12, title: 'Album' }],
+            searchArtists: async () => [{ id: 13, name: 'Artist' }],
+            searchPlaylists: async () => [{ id: 'catalog-playlist', title: 'Playlist' }],
+        } },
+    })('src/services/search.ts');
+    const page = await searchWithPlaybackFallback('query');
+    assert.equal(page.provider, 'playback');
+    assert.equal(page.tracks[0], source);
+    assert.equal(page.tracks[0].source, 'tidal');
+    assert.equal(page.albums[0].id, 12);
+    assert.equal(page.artists[0].id, 13);
+    assert.equal(page.playlists[0].id, 'catalog-playlist');
+    assert.equal(page.continuation, null);
+});
+
+test('empty YouTube categories fall back only to the requested playback category', async () => {
+    for (const [category, method, key] of [['songs', 'search', 'tracks'], ['albums', 'searchAlbums', 'albums'], ['artists', 'searchArtists', 'artists'], ['playlists', 'searchPlaylists', 'playlists']]) {
+        const calls = [];
+        const api = Object.fromEntries(['search', 'searchAlbums', 'searchArtists', 'searchPlaylists'].map(name => [name, async () => { calls.push(name); return [{ id: 1 }]; }]));
+        const { searchWithPlaybackFallback } = loader({ './ytmusic': { searchMusic: async () => emptySearch() }, '../api': { API: api } })('src/services/search.ts');
+        const page = await searchWithPlaybackFallback('query', category);
+        assert.deepEqual(calls, [method]);
+        assert.equal(page[key].length, 1);
+    }
+});
+
+test('YouTube pagination failures never replay tokens against playback providers', async () => {
+    let calls = 0;
+    const { searchWithPlaybackFallback } = loader({
+        './ytmusic': { searchMusic: async () => { throw new Error('offline'); } },
+        '../api': { API: { search: async () => { calls++; return []; } } },
+    })('src/services/search.ts');
+    await assert.rejects(searchWithPlaybackFallback('query', 'songs', 'yt-token'), /offline/);
+    assert.equal(calls, 0);
+});
+
+test('one playback search section failing does not discard successful sections', async () => {
+    const { searchWithPlaybackFallback } = loader({
+        './ytmusic': { searchMusic: async () => emptySearch() },
+        '../api': { API: { search: async () => [track(1)], searchAlbums: async () => { throw new Error('offline'); }, searchArtists: async () => [], searchPlaylists: async () => [] } },
+    })('src/services/search.ts');
+    const page = await searchWithPlaybackFallback('query');
+    assert.equal(page.tracks.length, 1);
+    assert.equal(page.albums.length, 0);
+});

@@ -1,13 +1,15 @@
+import { searchWithPlaybackFallback } from '../services/search';
+import { matchesSearch, searchTrackScore } from '../services/searchRanking';
 import { haptic } from '../services/haptics';
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import { ProfileCircle } from '../components/GlassHeader';
 import { useSongMenu } from '../components/SongMenu';
-import { searchSuggestions as ytSearchSuggestions } from '../services/ytmusic';
+import { searchSuggestions as ytSearchSuggestions, searchMusic, youtubeBrowseParams } from '../services/ytmusic';
 import { addSearchHistory, clearSearchHistory, getSearchHistory, removeSearchHistory } from '../store/searchHistory';
 import {
     View, Text, TextInput, TouchableOpacity, Image,
-    StyleSheet, ScrollView
+    StyleSheet, ScrollView, Keyboard
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from 'react-native-vector-icons/Ionicons';
@@ -18,7 +20,6 @@ import { useTheme } from '../context/ThemeContext';
 import { getListeningProfile, topArtists } from '../store/listeningProfile';
 import { getPrefs } from '../store/preferences';
 import { getRadioRecommendations } from '../services/recommendations';
-import TouchableScale from '../components/TouchableScale';
 import SkeletonPulse from '../components/SkeletonPulse';
 import { useAppDialog } from '../context/DialogContext';
 import { useScreenStatusBar } from '../hooks/useScreenStatusBar';
@@ -92,21 +93,8 @@ function rankAndDedupe<T>(items: T[], keyFor: (item: T) => string, scoreFor: (it
         .map(({ item }) => item);
 }
 
-function trackSearchScore(track: Track, query: string): number {
-    const normalizedQuery = normalizeSearchText(query);
-    const exactArtist = normalizeSearchText(track.artist?.name) === normalizedQuery;
-    const title = normalizeSearchText(track.title);
-    const requestedVariant = /\b(remix|cover|karaoke|instrumental|slowed|sped up|vocals? only)\b/.test(normalizedQuery);
-    const alternateVariant = /\b(remix|cover|karaoke|instrumental|slowed|sped up|vocals? only)\b/.test(title);
-    return (exactArtist ? 140 : textMatchScore(track.artist?.name, query))
-        + (exactArtist ? 0 : textMatchScore(track.title, query) * 2)
-        + textMatchScore(track.album?.title, query)
-        + Math.min(track.popularity || 0, 100) / 10
-        - (!requestedVariant && alternateVariant ? 80 : 0);
-}
-
 export default function TrackListScreen() {
-    const { playTrack, playFromUpNext, addToQueue, currentTrack, upNext } = usePlayerSummary();
+    const { playTrack, addToQueue, currentTrack } = usePlayerSummary();
     const { colors, theme } = useTheme();
     const { showDialog } = useAppDialog();
 
@@ -118,7 +106,9 @@ export default function TrackListScreen() {
         showDialog({ title: 'Added to queue', message: track.title, icon: 'list-outline' });
     }, [addToQueue, showDialog]);
     const [query, setQuery] = useState('');
+    const [source, setSource] = useState<'online' | 'library'>('online');
     const [tracks, setTracks] = useState<Track[]>([]);
+    const [topBrowse, setTopBrowse] = useState<Album | Artist | Playlist | undefined>();
     const [albums, setAlbums] = useState<Album[]>([]);
     const [artists, setArtists] = useState<Artist[]>([]);
     const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -126,14 +116,23 @@ export default function TrackListScreen() {
     const [activeFilter, setActiveFilter] = useState<FilterTab>('all');
     const [hasSearched, setHasSearched] = useState(false);
     const [submittedQuery, setSubmittedQuery] = useState('');
+    const [searchProvider, setSearchProvider] = useState<'youtube' | 'playback'>('youtube');
     const [searchError, setSearchError] = useState<string | null>(null);
     const [personalTracks, setPersonalTracks] = useState<Track[]>([]);
     const [relatedTracks, setRelatedTracks] = useState<Track[]>([]);
     const [tasteArtists, setTasteArtists] = useState<string[]>([]);
+    const [typeaheadTracks, setTypeaheadTracks] = useState<Track[]>([]);
+    const [typeaheadBrowse, setTypeaheadBrowse] = useState<(Album | Artist | Playlist)[]>([]);
+    const [searchContinuation, setSearchContinuation] = useState<string | null>(null);
+    const [loadingMore, setLoadingMore] = useState(false);
     const [remoteSuggestions, setRemoteSuggestions] = useState<SearchSuggestion[]>([]);
     const [suggestionsLoading, setSuggestionsLoading] = useState(false);
     const searchRequestId = useRef(0);
     const suggestionRequestId = useRef(0);
+    useEffect(() => () => {
+        searchRequestId.current += 1;
+        suggestionRequestId.current += 1;
+    }, []);
 
     const nav = useNavigation<any>();
     const [popularArtists, setPopularArtists] = useState<Artist[]>([]);
@@ -147,11 +146,11 @@ export default function TrackListScreen() {
     }, []);
 
     const localSuggestions = useMemo<SearchSuggestion[]>(() => {
-        const q = query.trim().toLocaleLowerCase();
+        const q = normalizeSearchText(query);
         if (!q || q === submittedQuery.toLocaleLowerCase()) return [];
         const suggestions: SearchSuggestion[] = [];
         personalTracks.forEach(track => {
-            if (`${track.title} ${track.artist?.name || ''}`.toLocaleLowerCase().includes(q)) suggestions.push({
+            if (matchesSearch(`${track.title} ${track.artist?.name || ''}`, q)) suggestions.push({
                 key: `history-track-${track.id}`,
                 label: track.title,
                 subtitle: `${track.artist?.name || 'Unknown artist'} · From your grooves`,
@@ -161,7 +160,7 @@ export default function TrackListScreen() {
             });
         });
         [...tasteArtists, ...popularArtists.map(artist => artist.name)].forEach(name => {
-            if (name.toLocaleLowerCase().includes(q)) suggestions.push({
+            if (matchesSearch(name, q)) suggestions.push({
                 key: `local-artist-${normalizeSearchText(name)}`,
                 label: name,
                 subtitle: 'Artist',
@@ -184,7 +183,7 @@ export default function TrackListScreen() {
     useEffect(() => {
         const q = query.trim();
         const requestId = ++suggestionRequestId.current;
-        if (q.length < 2 || normalizeSearchText(q) === normalizeSearchText(submittedQuery)) {
+        if (source !== 'online' || q.length < 2 || normalizeSearchText(q) === normalizeSearchText(submittedQuery)) {
             setRemoteSuggestions([]);
             setSuggestionsLoading(false);
             return;
@@ -199,9 +198,25 @@ export default function TrackListScreen() {
                 key: `yt-suggest-${text}`, label: text, subtitle: '', query: text, kind: 'query' as const,
             })));
             setSuggestionsLoading(false);
-        }, 300);
+        }, 180);
         return () => clearTimeout(timer);
-    }, [query, submittedQuery]);
+    }, [query, submittedQuery, source]);
+
+    useEffect(() => {
+        const q = query.trim();
+        const requestId = suggestionRequestId.current;
+        setTypeaheadTracks([]);
+        setTypeaheadBrowse([]);
+        if (source !== 'online' || q.length < 2 || normalizeSearchText(q) === normalizeSearchText(submittedQuery)) return;
+        const timer = setTimeout(() => {
+            searchMusic(q).then(page => {
+                if (requestId !== suggestionRequestId.current) return;
+                setTypeaheadTracks(page.tracks.slice(0, 3));
+                setTypeaheadBrowse([...page.artists, ...page.albums, ...page.playlists].slice(0, 4));
+            }).catch(() => {});
+        }, 350);
+        return () => clearTimeout(timer);
+    }, [query, submittedQuery, source]);
 
     const searchSuggestions = useMemo(() => rankAndDedupe(
         [...remoteSuggestions, ...localSuggestions],
@@ -209,34 +224,37 @@ export default function TrackListScreen() {
         item => textMatchScore(item.label, query) + (item.kind === 'history' ? 4 : 0),
     ).slice(0, 8), [localSuggestions, query, remoteSuggestions]);
 
-    const performSearch = useCallback(async (searchQuery?: string) => {
+    const performSearch = useCallback(async (searchQuery?: string, filter: FilterTab = 'all') => {
         const q = (searchQuery || query).trim();
         if (!q) return;
         const requestId = ++searchRequestId.current;
+        suggestionRequestId.current += 1;
+        setRemoteSuggestions([]);
+        setSuggestionsLoading(false);
+        Keyboard.dismiss();
+        setTypeaheadTracks([]);
+        setTypeaheadBrowse([]);
+        setSearchContinuation(null);
+        setLoadingMore(false);
+        setActiveFilter(filter);
         setLoading(true);
         setHasSearched(true);
         setSubmittedQuery(q);
         setSearchError(null);
+        setTopBrowse(undefined);
         setRelatedTracks([]);
+        setTracks([]); setAlbums([]); setArtists([]); setPlaylists([]);
         try {
-            const results = await API.searchCatalog(q);
+            const results = await searchWithPlaybackFallback(q, filter);
             if (requestId !== searchRequestId.current) return;
-            const rankedTracks = rankAndDedupe(
-                results.tracks,
-                track => `${track.title}-${track.artist?.name}-${track.album?.title}`,
-                track => trackSearchScore(track, q),
-            );
-            const rankedAlbums = rankAndDedupe(
-                results.albums,
-                album => `${album.title}-${album.artist?.name}`,
-                album => textMatchScore(album.title, q) * 2 + textMatchScore(album.artist?.name, q),
-            );
-            const rankedArtists = rankAndDedupe(results.artists, artist => artist.name, artist => textMatchScore(artist.name, q));
-            const rankedPlaylists = rankAndDedupe(
-                results.playlists,
-                playlist => `${playlist.title}-${playlist.creatorName}`,
-                playlist => textMatchScore(playlist.title, q) * 2 + textMatchScore(playlist.creatorName, q),
-            );
+            setSearchProvider(results.provider);
+            setTopBrowse(results.topBrowse);
+            setSearchContinuation(results.continuation);
+            // Preserve YouTube's ranking and browse ids; never locally re-rank provider results.
+            const rankedTracks = results.tracks;
+            const rankedAlbums = results.albums;
+            const rankedArtists = results.artists;
+            const rankedPlaylists = results.playlists;
             setTracks(rankedTracks);
             setAlbums(rankedAlbums);
             setArtists(rankedArtists);
@@ -265,6 +283,34 @@ export default function TrackListScreen() {
         }
     }, [query]);
 
+    const loadMoreSearch = async () => {
+        if (!searchContinuation || loadingMore) return;
+        const requestId = searchRequestId.current;
+        const token = searchContinuation;
+        setLoadingMore(true);
+        try {
+            const page = await searchMusic(submittedQuery, activeFilter, token);
+            if (requestId !== searchRequestId.current) return;
+            const append = <T extends { id: string | number; ytBrowseId?: string; ytVideoId?: string }>(previous: T[], incoming: T[]): T[] => {
+                const seen = new Set(previous.map(item => item.ytBrowseId ?? item.ytVideoId ?? item.id));
+                return [...previous, ...incoming.filter(item => {
+                    const key = item.ytBrowseId ?? item.ytVideoId ?? item.id;
+                    if (seen.has(key)) return false;
+                    seen.add(key); return true;
+                })];
+            };
+            setTracks(previous => append(previous, page.tracks));
+            setAlbums(previous => append(previous, page.albums));
+            setArtists(previous => append(previous, page.artists));
+            setPlaylists(previous => append(previous, page.playlists));
+            setSearchContinuation(page.continuation === token ? null : page.continuation);
+        } catch {
+            if (requestId === searchRequestId.current) showDialog({ title: 'Could not load more', message: 'Try again to load more search results.' });
+        } finally {
+            if (requestId === searchRequestId.current) setLoadingMore(false);
+        }
+    };
+
     // Explore's mood pages hand a playlist over to open here.
     const route = useRoute<any>();
     useEffect(() => {
@@ -281,6 +327,7 @@ export default function TrackListScreen() {
 
     const openPlaylist = useCallback(async (playlist: Playlist) => {
         const requestId = ++searchRequestId.current;
+        setTopBrowse(undefined); setSearchContinuation(null); setLoadingMore(false);
         setLoading(true);
         setSearchError(null);
         try {
@@ -303,7 +350,6 @@ export default function TrackListScreen() {
 
     const c = theme === 'soundwave' ? GX_LIGHT : GX_DARK;
     const [recentSearches, setRecentSearches] = useState<Track[]>([]);
-    const [source, setSource] = useState<'online' | 'library'>('online');
     const inputRef = useRef<TextInput>(null);
     useFocusEffect(useCallback(() => {
         getSearchHistory().then(setRecentSearches);
@@ -320,6 +366,11 @@ export default function TrackListScreen() {
 
     const clearSearch = () => {
         searchRequestId.current += 1;
+        suggestionRequestId.current += 1;
+        setTypeaheadTracks([]);
+        setTypeaheadBrowse([]); setRemoteSuggestions([]); setSuggestionsLoading(false);
+        setSearchContinuation(null); setLoadingMore(false);
+        setTopBrowse(undefined); setTypeaheadBrowse([]);
         setQuery(''); setTracks([]); setAlbums([]); setArtists([]); setPlaylists([]); setRelatedTracks([]);
         setSubmittedQuery(''); setHasSearched(false); setSearchError(null); setLoading(false);
     };
@@ -354,14 +405,14 @@ export default function TrackListScreen() {
     const withDividers = (nodes: React.ReactNode[], prefix: string) =>
         nodes.flatMap((node, index) => index < nodes.length - 1 ? [node, divider(`${prefix}-div-${index}`)] : [node]);
 
-    const openArtist = (artist: Artist) => nav.navigate('AlbumDetail', { artistId: artist.id, artistData: artist });
-    const openAlbum = (album: Album) => { if (album.id) nav.navigate('AlbumDetail', { albumId: album.id, albumData: album }); };
+    const openArtist = (artist: Artist) => nav.navigate('AlbumDetail', artist.ytBrowseId ? youtubeBrowseParams(artist) : { artistId: artist.id, artistData: artist });
+    const openAlbum = (album: Album) => { if (album.id) nav.navigate('AlbumDetail', album.ytBrowseId ? youtubeBrowseParams(album) : { albumId: album.id, albumData: album }); };
 
     const albumRows = albums.map(album => renderBrowseRow(`album-${album.id}`, album.title,
         ['Album', album.artist?.name, album.releaseDate?.slice(0, 4)].filter(Boolean).join(' · '), album.cover, false, () => openAlbum(album)));
     const artistRows = artists.map(artist => renderBrowseRow(`artist-${artist.id}`, artist.name, 'Artist', artist.picture, true, () => openArtist(artist)));
     const playlistRows = playlists.map(playlist => renderBrowseRow(`playlist-${playlist.id}`, playlist.title,
-        ['Playlist', playlist.creatorName, `${playlist.numberOfTracks} songs`, formatCatalogDuration(playlist.duration)].filter(Boolean).join(' · '), playlist.cover, false, () => nav.navigate('AlbumDetail', { playlistId: playlist.id, playlistData: playlist })));
+        ['Playlist', playlist.creatorName, playlist.numberOfTracks ? `${playlist.numberOfTracks} songs` : '', formatCatalogDuration(playlist.duration)].filter(Boolean).join(' · '), playlist.cover, false, () => nav.navigate('AlbumDetail', playlist.ytBrowseId ? youtubeBrowseParams(playlist) : { playlistId: playlist.id, playlistData: playlist })));
 
     const sectionTitle = (title: string) => (
         <Text key={`section-${title}`} style={[GX_TYPE.titleSmall, styles.sectionTitle, { color: c.onSurface }]}>{title}</Text>
@@ -410,7 +461,7 @@ export default function TrackListScreen() {
     );
 
     const renderContent = () => {
-        if (loading && source === 'online') return skeleton;
+        if (loading && source === 'online' && query.trim() === submittedQuery) return skeleton;
 
         // Suggestions while typing (searchSuggestions + typeahead).
         if (source === 'online' && query.trim() && query.trim().toLocaleLowerCase() !== submittedQuery.toLocaleLowerCase()) {
@@ -420,6 +471,12 @@ export default function TrackListScreen() {
                         <Ionicons name="search" size={20} color={c.onSurfaceVariant} />
                         <Text style={[GX_TYPE.bodyLarge, styles.suggestionText, { color: c.onBackground }]} numberOfLines={1}>{query.trim()}</Text>
                     </TouchableOpacity>
+                    {typeaheadBrowse.map(item => renderBrowseRow(`preview-${item.ytBrowseId}`,
+                        'name' in item ? item.name : item.title,
+                        'name' in item ? 'Artist' : typeof item.id === 'string' ? 'Playlist' : 'Album',
+                        'name' in item ? item.picture : item.cover, 'name' in item,
+                        () => nav.navigate('AlbumDetail', youtubeBrowseParams(item))))}
+                    {typeaheadTracks.map(track => renderSongRow(track, `typeahead-${track.ytVideoId}`))}
                     {searchSuggestions.map(suggestion => suggestion.cover || suggestion.kind === 'artist' ? (
                         renderBrowseRow(suggestion.key, suggestion.label, suggestion.subtitle, suggestion.cover, suggestion.kind === 'artist', () => onQuickSearch(suggestion.query))
                     ) : (
@@ -444,8 +501,8 @@ export default function TrackListScreen() {
             const local = rankAndDedupe(
                 [...recentSearches, ...personalTracks],
                 track => `${track.id}`,
-                track => trackSearchScore(track, query),
-            ).filter(track => normalizeSearchText(`${track.title} ${track.artist?.name || ''} ${track.album?.title || ''}`).includes(q));
+                track => searchTrackScore(query, track),
+            ).filter(track => matchesSearch(`${track.title} ${track.artist?.name || ''} ${track.album?.title || ''}`, q));
             return local.length === 0
                 ? <Text style={[GX_TYPE.bodyMedium, styles.message, { color: c.onSurfaceVariant }]}>Nothing in your library matches “{query.trim()}”</Text>
                 : <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.listContent}>{local.map(track => renderSongRow(track, `local-${track.id}`))}</ScrollView>;
@@ -488,10 +545,17 @@ export default function TrackListScreen() {
             return <Text style={[GX_TYPE.bodyMedium, styles.message, { color: c.onSurfaceVariant }]}>{searchError || 'No results found'}</Text>;
         }
 
-        const songs = (activeFilter === 'all' ? tracks.slice(1, 6) : tracks).map(track => renderSongRow(track, `song-${track.id}`));
+        const songs = (activeFilter === 'all' ? tracks.slice(topBrowse ? 0 : 1, 6) : tracks).map(track => renderSongRow(track, `song-${track.id}`));
         const body: React.ReactNode[] = [];
         if (activeFilter === 'all') {
-            if (topResult) body.push(<View key="top">{renderTopResult(topResult)}</View>);
+            if (topBrowse) body.push(<View key="top-browse">
+                {sectionTitle('Top result')}
+                {renderBrowseRow('top-browse-row', 'name' in topBrowse ? topBrowse.name : topBrowse.title,
+                    'name' in topBrowse ? 'Artist' : typeof topBrowse.id === 'string' ? 'Playlist' : 'Album',
+                    'name' in topBrowse ? topBrowse.picture : topBrowse.cover, 'name' in topBrowse,
+                    () => nav.navigate('AlbumDetail', youtubeBrowseParams(topBrowse)))}
+            </View>);
+            else if (topResult) body.push(<View key="top">{renderTopResult(topResult)}</View>);
             if (songs.length) body.push(sectionTitle('Songs'), ...withDividers(songs, 'songs'));
             if (artistRows.length) body.push(sectionTitle('Artists'), ...withDividers(artistRows.slice(0, 4), 'artists'));
             if (albumRows.length) body.push(sectionTitle('Albums'), ...withDividers(albumRows.slice(0, 4), 'albums'));
@@ -500,6 +564,11 @@ export default function TrackListScreen() {
             const rows = activeFilter === 'songs' ? songs : activeFilter === 'albums' ? albumRows : activeFilter === 'artists' ? artistRows : playlistRows;
             if (rows.length === 0) return <Text style={[GX_TYPE.bodyMedium, styles.message, { color: c.onSurfaceVariant }]}>No results for “{submittedQuery}”</Text>;
             body.push(...withDividers(rows, activeFilter));
+        }
+        if (searchContinuation) {
+            body.push(<TouchableOpacity key="more-search" onPress={loadMoreSearch} disabled={loadingMore} accessibilityRole="button" style={styles.suggestionRow}>
+                <Text style={[GX_TYPE.bodyLarge, { color: c.onBackground }]}>{loadingMore ? 'Loading more…' : 'Load more results'}</Text>
+            </TouchableOpacity>);
         }
         if (relatedTracks.length > 0 && (activeFilter === 'all' || activeFilter === 'songs')) {
             body.push(
@@ -525,17 +594,24 @@ export default function TrackListScreen() {
             <View style={styles.searchHeader}>
             {/* SearchField beside the glass profile circle */}
             <View style={[styles.searchField, { backgroundColor: c.surfaceVariant }]}>
-                <TouchableOpacity onPress={() => performSearch()} disabled={!query.trim()} style={styles.searchIcon} accessibilityRole="button" accessibilityLabel="Search">
+                <TouchableOpacity onPress={() => { if (source === 'online') performSearch(); }} disabled={!query.trim() || source === 'library'} style={styles.searchIcon} accessibilityRole="button" accessibilityLabel="Search">
                     <Ionicons name="search" size={20} color={c.onSurfaceVariant} />
                 </TouchableOpacity>
                 <TextInput
                     ref={inputRef}
                     style={[GX_TYPE.bodyLarge, styles.searchInput, { color: c.onBackground }]}
-                    placeholder="Artists, Songs, Lyrics and More"
+                    accessibilityLabel="Search music"
+                    autoCorrect={false}
+                    autoCapitalize="none"
+                    placeholder="Songs, artists, albums and playlists"
                     placeholderTextColor={c.onSurfaceVariant}
                     selectionColor={c.primary}
                     value={query}
                     onChangeText={(text) => {
+                        searchRequestId.current += 1;
+                        suggestionRequestId.current += 1;
+                        setLoading(false);
+                        setRemoteSuggestions([]);
                         setQuery(text);
                         if (!text.trim()) clearSearch();
                     }}
@@ -543,7 +619,7 @@ export default function TrackListScreen() {
                     returnKeyType="search"
                 />
                 {query.length > 0 && (
-                    <TouchableOpacity onPress={clearSearch} style={styles.clearButton} accessibilityRole="button" accessibilityLabel="Clear search">
+                    <TouchableOpacity onPress={clearSearch} hitSlop={8} style={styles.clearButton} accessibilityRole="button" accessibilityLabel="Clear search">
                         <Ionicons name="close" size={18} color={c.onSurfaceVariant} />
                     </TouchableOpacity>
                 )}
@@ -553,8 +629,7 @@ export default function TrackListScreen() {
             </View>
 
             {/* source switcher */}
-            {!query.trim() || source === 'library' || !hasSearched ? (
-                <View style={[styles.sourceSwitch, { backgroundColor: c.surfaceVariant }]}>
+            <View style={[styles.sourceSwitch, { backgroundColor: c.surfaceVariant }]}>
                     {([['online', 'Online'], ['library', 'Library']] as const).map(([id, label]) => {
                         const selected = source === id;
                         return (
@@ -563,11 +638,10 @@ export default function TrackListScreen() {
                             </TouchableOpacity>
                         );
                     })}
-                </View>
-            ) : null}
+            </View>
 
             {/* SearchFilterTabs: 12dp-corner pills, selected inverted */}
-            {hasSearched && query.trim().toLocaleLowerCase() === submittedQuery.toLocaleLowerCase() && (
+            {source === 'online' && hasSearched && query.trim().toLocaleLowerCase() === submittedQuery.toLocaleLowerCase() && (
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll} contentContainerStyle={styles.filterRow}>
                     {FILTER_TABS.map(tab => {
                         const selected = activeFilter === tab.key;
@@ -575,7 +649,7 @@ export default function TrackListScreen() {
                             <TouchableOpacity
                                 key={tab.key}
                                 style={[styles.filterPill, { backgroundColor: selected ? c.onBackground : c.surfaceVariant }]}
-                                onPress={() => { haptic('select'); setActiveFilter(tab.key); }}
+                                onPress={() => { haptic('select'); performSearch(submittedQuery, tab.key); }}
                                 activeOpacity={0.8}
                                 accessibilityRole="button"
                                 accessibilityState={{ selected }}
@@ -587,12 +661,14 @@ export default function TrackListScreen() {
                 </ScrollView>
             )}
 
+            {source === 'online' && hasSearched && !loading && searchProvider === 'playback' && query.trim() === submittedQuery && (
+                <Text style={[GX_TYPE.bodyMedium, { color: c.onSurfaceVariant, marginHorizontal: PAGE_GUTTER }]}>Results from playback catalog</Text>
+            )}
             {renderContent()}
         </SafeAreaView>
     );
 }
 
-const MOOD_COLORS = ['#C2410C', '#7C3AED', '#0F766E', '#BE185D', '#1D4ED8', '#4D7C0F', '#B91C1C', '#A16207'];
 
 const styles = StyleSheet.create({
     root: { flex: 1 },
@@ -604,7 +680,7 @@ const styles = StyleSheet.create({
     flexText: { flex: 1 },
     searchField: { flex: 1, height: 46, borderRadius: 11, paddingLeft: 8, paddingRight: 12, flexDirection: 'row', alignItems: 'center' },
     searchIcon: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginRight: 4 },
-    searchInput: { flex: 1, padding: 0 },
+    searchInput: { flex: 1, minWidth: 0, paddingVertical: 0, paddingHorizontal: 0, includeFontPadding: false },
     clearButton: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
     filterScroll: { flexGrow: 0 },
     filterRow: { paddingHorizontal: PAGE_GUTTER, paddingVertical: 6, gap: 8, alignItems: 'center' },
