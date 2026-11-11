@@ -38,7 +38,7 @@
 ---
 
 > [!TIP]
-> **Sign in with Google (your Gmail account) for the best experience.**
+> **You must sign in with Google (your Gmail account) to get in right away. Otherwise your device waits for manual approval.**
 > - **Instant access** — signing in approves your phone straight away, no waiting.
 > - **Your YouTube music on Home** — your YouTube likes, playlists and subscriptions show up as their own shelves.
 >
