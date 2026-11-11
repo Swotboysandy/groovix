@@ -81,7 +81,12 @@ function songFromListItem(renderer: any): YtSong | null {
     const albumRun = second.find((run: any) => run?.navigationEndpoint?.browseEndpoint?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType === 'MUSIC_PAGE_TYPE_ALBUM');
     const artist = artistRuns.length ? artistRuns.map((run: any) => run.text).join(', ') : artistFromSubtitle(byline);
     const durationText = byline.split(' • ').map(part => part.trim()).find(part => /^\d+(:\d+)+$/.test(part));
-    return { videoId, title, artist, album: albumRun?.text, artistBrowseId: artistRuns[0]?.navigationEndpoint?.browseEndpoint?.browseId, albumBrowseId: albumRun?.navigationEndpoint?.browseEndpoint?.browseId, durationSec: parseDuration(durationText) ?? parseDuration(runsText(renderer?.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text)), thumbnail: bestThumbnail(renderer?.thumbnail) };
+    // "Artist • Album • 4:29": when the album isn't linked, it is the part
+    // between the artist and the length.
+    const parts = byline.split(' • ').map(part => part.trim()).filter(Boolean);
+    const textAlbum = parts.length >= 3 && /^\d+(:\d+)+$/.test(parts[parts.length - 1]) && !/^(song|video|single|ep)$/i.test(parts[parts.length - 2])
+        ? parts[parts.length - 2] : undefined;
+    return { videoId, title, artist, album: albumRun?.text ?? textAlbum, artistBrowseId: artistRuns[0]?.navigationEndpoint?.browseEndpoint?.browseId, albumBrowseId: albumRun?.navigationEndpoint?.browseEndpoint?.browseId, durationSec: parseDuration(durationText) ?? parseDuration(runsText(renderer?.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text)), thumbnail: bestThumbnail(renderer?.thumbnail) };
 }
 
 function albumFromTwoRow(renderer: any): YtAlbum | null {

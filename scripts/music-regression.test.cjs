@@ -693,3 +693,11 @@ test('one playback search section failing does not discard successful sections',
     assert.equal(page.tracks.length, 1);
     assert.equal(page.albums.length, 0);
 });
+
+test('a same-length instrumental or cover album never wins over the original song', () => {
+    const { bestRecording } = loader()('src/services/musicMatching.ts');
+    const original = { ...track(412830594, 'Tum Se Hi', 'Pritam', 321), album: { id: 1, title: 'Jab We Met', cover: '' } };
+    const strings = { ...track(411278233, 'Tum Se Hi', 'Pritam', 322), album: { id: 2, title: 'Singing Strings Vol-2', cover: '' } };
+    const picked = bestRecording({ title: 'Tum Se Hi', artist: 'Pritam, Mohit Chauhan, Irshad Kamil', duration: 322 }, [strings, original]);
+    assert.equal(picked.id, 412830594);
+});

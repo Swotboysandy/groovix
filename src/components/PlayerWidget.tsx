@@ -124,33 +124,30 @@ async function fetchAndSaveLyrics(track: Track, lrcPath: string): Promise<void> 
     } catch { }
 }
 
-function AmbientBackground({ trackId, coverUrl, enabled }: { trackId: number; coverUrl: string; enabled: boolean }) {
-    const fadeA = useSharedValue(0);
-    const [imgA, setImgA] = useState(coverUrl);
+function AmbientBackground({ coverUrl, enabled }: { coverUrl: string; enabled: boolean }) {
+    // The old artwork stays underneath while the new one fades in over it, so
+    // the backdrop never dips to black. Same artwork (a YouTube song swapping
+    // to its matched recording) changes nothing.
+    const fade = useSharedValue(1);
+    const [front, setFront] = useState(coverUrl);
+    const [back, setBack] = useState(coverUrl);
 
-    // Cross-fade to new artwork when track changes
     useEffect(() => {
-        fadeA.value = withTiming(0, { duration: 150, easing: Easing.out(Easing.quad) }, () => {
-            runOnJS(setImgA)(coverUrl);
-            fadeA.value = withTiming(1, { duration: 210, easing: Easing.in(Easing.quad) });
-        });
-    }, [coverUrl, fadeA, trackId]);
+        if (coverUrl === front) return;
+        setBack(front);
+        setFront(coverUrl);
+        fade.value = 0;
+        fade.value = withTiming(1, { duration: 320, easing: Easing.out(Easing.quad) });
+    }, [coverUrl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const artStyle  = useAnimatedStyle(() => ({
-        opacity: fadeA.value,
-    }));
+    const frontStyle = useAnimatedStyle(() => ({ opacity: fade.value }));
 
+    if (!enabled) return null;
     return (
         <View style={StyleSheet.absoluteFill} pointerEvents="none">
             {/* Blurred poster at full opacity — colors come from the art itself */}
-            {enabled && (
-                <Animated.Image
-                    source={{ uri: imgA }}
-                    style={[StyleSheet.absoluteFill, artStyle]}
-                    blurRadius={12}
-                    resizeMode="cover"
-                />
-            )}
+            <Animated.Image source={{ uri: back }} style={StyleSheet.absoluteFill} blurRadius={12} resizeMode="cover" fadeDuration={0} />
+            <Animated.Image source={{ uri: front }} style={[StyleSheet.absoluteFill, frontStyle]} blurRadius={12} resizeMode="cover" fadeDuration={0} />
         </View>
     );
 }
@@ -800,7 +797,7 @@ export default function PlayerWidget() {
                         <View style={[styles.miniPill, { backgroundColor: 'rgba(30,30,32,0.94)' }]} />
                     </Animated.View>
                     <Animated.View style={[StyleSheet.absoluteFill, bgOpacityStyle, { backgroundColor: '#000' }]}>
-                        <AmbientBackground trackId={currentTrack.id} coverUrl={API.getCoverUrl(currentTrack.album?.cover, 360)} enabled={playerExpanded && !settings.reduceBlur} />
+                        <AmbientBackground coverUrl={API.getCoverUrl(currentTrack.album?.cover, 360)} enabled={playerExpanded && !settings.reduceBlur} />
                         {/* Scrim: keeps white icons/text readable over bright or light-colored artwork */}
                         <View style={styles.scrim} pointerEvents="none" />
                     </Animated.View>

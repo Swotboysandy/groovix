@@ -47,7 +47,7 @@ export function looseSameRecording(source: Recording, candidate: Track, toleranc
     if (!a || !b || !(a.startsWith(b) || b.startsWith(a))) return false;
     if (recordingVariant(source.title) !== recordingVariant(candidate.title)) return false;
     const credits = (value: string) => value.replace(/\s*-\s*Topic$/i, '')
-        .split(/,|&|;|feat\.?\s|featuring\s|and/i).map(normalizeMusicText).filter(Boolean);
+        .split(/,|&|;|\bfeat\.?\s|\bfeaturing\s|\band\b/i).map(normalizeMusicText).filter(Boolean);
     const candidateCredits = [candidate.artist?.name || '', ...(candidate.artists || []).map(artist => artist.name)].flatMap(credits);
     if (!credits(source.artist).some(name => candidateCredits.includes(name))) return false;
     if (source.duration && candidate.duration && Math.abs(source.duration - candidate.duration) > toleranceSec) return false;
@@ -55,6 +55,9 @@ export function looseSameRecording(source: Recording, candidate: Track, toleranc
 }
 
 type ScoredRecording = Recording & { album?: string; explicit?: boolean };
+
+/** Words that mark a different take of a song: covers, instrumentals, karaoke, lo-fi, string versions. */
+const ALTERNATE_VERSION = /\b(instrumental|karaoke|cover|covered|tribute|lo-?fi|strings?|piano|flute|violin|guitar version|unplugged|reprise|8d|slowed|reverb)\b/i;
 
 /** The best candidate that is the same recording, or null. */
 export function bestRecording(source: ScoredRecording, candidates: Track[]): Track | null {
@@ -67,6 +70,11 @@ export function bestRecording(source: ScoredRecording, candidates: Track[]): Tra
         if (source.album && candidate.album?.title && normalizeMusicText(source.album) === normalizeMusicText(candidate.album.title)) score += 35;
         if (source.explicit != null && candidate.explicit != null && source.explicit !== candidate.explicit) score -= 20;
         if (normalizeMusicText(candidate.title) === normalizeMusicText(source.title)) score += 5;
+        // A cover or instrumental album often has the same title and length as
+        // the original; never prefer one unless that's what was asked for.
+        const wanted = `${source.title} ${source.album ?? ''}`;
+        const offered = `${candidate.title} ${candidate.album?.title ?? ''}`;
+        if (ALTERNATE_VERSION.test(offered) && !ALTERNATE_VERSION.test(wanted)) score -= 60;
         if (score > bestScore) { best = candidate; bestScore = score; }
     }
     return best;

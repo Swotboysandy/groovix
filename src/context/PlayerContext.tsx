@@ -2,7 +2,7 @@ import NetInfo from '@react-native-community/netinfo';
 import { appSettings, loadAppSettings, subscribeAppSettings } from '../store/appSettings';
 import { scrobbleIfHeard, sendNowPlaying } from '../services/listenbrainz';
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { StyleSheet } from 'react-native';
+import { Alert, StyleSheet } from 'react-native';
 import Video, { VideoRef } from 'react-native-video';
 import RNFS from 'react-native-fs';
 import { API, getTidalProxyDashManifest, StreamData } from '../api';
@@ -262,7 +262,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // A song no source can play skips to the next one instead of stopping the music.
     const skipUnplayableRef = useRef<() => void>(() => {});
     const unplayableSkipsRef = useRef(0);
+    // The song the listener tapped themselves: if it can't play, say so rather
+    // than quietly playing a different song in its place.
+    const pickedTrackIdRef = useRef<number | null>(null);
     const skipUnplayable = useCallback(() => {
+        const current = currentTrackRef.current;
+        if (current && pickedTrackIdRef.current === current.id) {
+            pickedTrackIdRef.current = null;
+            Alert.alert('Song not available', `"${current.title}" can't be played right now. Try another version of it.`);
+            return false;
+        }
         if (unplayableSkipsRef.current >= MAX_UNPLAYABLE_SKIPS) return false;
         unplayableSkipsRef.current += 1;
         skipUnplayableRef.current();
@@ -457,7 +466,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             resolveYouTubeTrack(track).catch(() => null).then(real => {
                 if (playSessionRef.current !== session) return;
                 // No catalogue match: try the song through the free fallback sources.
-                startTrackRef.current(real ?? { ...track }, startAt, recordHistory, true);
+                // Keep the title, artist and cover that were tapped so the player doesn't
+                // flicker to the catalogue's wording; only the audio source changes.
+                const shown = real ? { ...real, title: track.title, artist: track.artist, coverUrl: track.coverUrl, album: { ...real.album, cover: track.album?.cover || real.album?.cover } } : { ...track };
+                if (pickedTrackIdRef.current === track.id) pickedTrackIdRef.current = shown.id;
+                startTrackRef.current(shown, startAt, recordHistory, true);
             });
             return;
         }
@@ -501,6 +514,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     startTrackRef.current = startTrack;
 
     const playTrack = useCallback((track: Track, startAt: number = 0) => {
+        pickedTrackIdRef.current = track.id;
         autoQueueRef.current = [];
         syncUpNext();
         startTrack(track, startAt, true);
@@ -508,6 +522,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const playPlaylist = useCallback((tracks: Track[], startIndex = 0) => {
         if (!Number.isInteger(startIndex) || startIndex < 0 || !tracks[startIndex]) return;
+        pickedTrackIdRef.current = tracks[startIndex].id;
         autoQueueRef.current = [];
         syncQueue(tracks.slice(startIndex + 1));
         startTrack(tracks[startIndex], 0, true);
