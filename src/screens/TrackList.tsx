@@ -408,10 +408,12 @@ export default function TrackListScreen() {
     const openArtist = (artist: Artist) => nav.navigate('AlbumDetail', artist.ytBrowseId ? youtubeBrowseParams(artist) : { artistId: artist.id, artistData: artist });
     const openAlbum = (album: Album) => { if (album.id) nav.navigate('AlbumDetail', album.ytBrowseId ? youtubeBrowseParams(album) : { albumId: album.id, albumData: album }); };
 
-    const albumRows = albums.map(album => renderBrowseRow(`album-${album.id}`, album.title,
+    // In the All view the Top result isn't repeated in its own section below.
+    const notTop = <T extends { ytBrowseId?: string }>(item: T) => activeFilter !== 'all' || !topBrowse?.ytBrowseId || item.ytBrowseId !== topBrowse.ytBrowseId;
+    const albumRows = albums.filter(notTop).map(album => renderBrowseRow(`album-${album.id}`, album.title,
         ['Album', album.artist?.name, album.releaseDate?.slice(0, 4)].filter(Boolean).join(' · '), album.cover, false, () => openAlbum(album)));
-    const artistRows = artists.map(artist => renderBrowseRow(`artist-${artist.id}`, artist.name, 'Artist', artist.picture, true, () => openArtist(artist)));
-    const playlistRows = playlists.map(playlist => renderBrowseRow(`playlist-${playlist.id}`, playlist.title,
+    const artistRows = artists.filter(notTop).map(artist => renderBrowseRow(`artist-${artist.id}`, artist.name, 'Artist', artist.picture, true, () => openArtist(artist)));
+    const playlistRows = playlists.filter(notTop).map(playlist => renderBrowseRow(`playlist-${playlist.id}`, playlist.title,
         ['Playlist', playlist.creatorName, playlist.numberOfTracks ? `${playlist.numberOfTracks} songs` : '', formatCatalogDuration(playlist.duration)].filter(Boolean).join(' · '), playlist.cover, false, () => nav.navigate('AlbumDetail', playlist.ytBrowseId ? youtubeBrowseParams(playlist) : { playlistId: playlist.id, playlistData: playlist })));
 
     const sectionTitle = (title: string) => (
@@ -682,7 +684,7 @@ const styles = StyleSheet.create({
     searchIcon: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginRight: 4 },
     searchInput: { flex: 1, minWidth: 0, paddingVertical: 0, paddingHorizontal: 0, includeFontPadding: false },
     clearButton: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-    filterScroll: { flexGrow: 0 },
+    filterScroll: { flexGrow: 0, flexShrink: 0 },
     filterRow: { paddingHorizontal: PAGE_GUTTER, paddingVertical: 6, gap: 8, alignItems: 'center' },
     filterPill: { paddingVertical: 6, borderRadius: 12, paddingHorizontal: 12, justifyContent: 'center' },
     filterLabel: { includeFontPadding: false, textAlignVertical: 'center' },

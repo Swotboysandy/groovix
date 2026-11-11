@@ -155,6 +155,7 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
                 if (!live) return;
                 setTracks(page.songs.map(youtubeTrack));
                 setBrowseContinuation(page.continuation);
+                if (!page.songs.length && !page.albums.length) setLoadError('Nothing to play here yet.');
                 if (params.ytArtistId) {
                     setArtist(current => ({ id: current?.id ?? 0, ...current, name: page.title || current?.name || '', picture: page.thumbnail || current?.picture, ytBrowseId: params.ytArtistId }));
                     setAlbums(page.albums);

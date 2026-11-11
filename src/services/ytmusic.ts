@@ -184,7 +184,8 @@ function browseSearchItem(renderer: any): { kind: 'albums' | 'artists' | 'playli
     const cover = bestThumbnail(renderer.thumbnail ?? renderer.thumbnailRenderer) ?? '';
     const subtitle = runsText(subtitleNode);
     const base = { id: youtubeTrackId(browseId), ytBrowseId: browseId };
-    if (pageType === 'MUSIC_PAGE_TYPE_ARTIST' || browseId.startsWith('UC')) {
+    // A channel id alone isn't an artist: user channels start with UC too.
+    if (pageType === 'MUSIC_PAGE_TYPE_ARTIST' || (!pageType && browseId.startsWith('UC'))) {
         return { kind: 'artists', item: { ...base, name: title, picture: cover } };
     }
     if (pageType === 'MUSIC_PAGE_TYPE_ALBUM' || browseId.startsWith('MPRE')) {
@@ -227,13 +228,32 @@ export function parseMusicSearch(response: any): MusicSearchPage {
             const card = item.musicCardShelfRenderer;
             if (card) {
                 const promoted = browseSearchItem(card);
-                if (promoted) page.topBrowse = promoted.item;
-                const endpoint = card.navigationEndpoint ?? card.title?.runs?.[0]?.navigationEndpoint ?? card.onTap;
-                add({ ...card, navigationEndpoint: endpoint,
-                    playlistItemData: { videoId: endpoint?.watchEndpoint?.videoId },
-                    flexColumns: [card.title, card.subtitle].map(text => ({ musicResponsiveListItemFlexColumnRenderer: { text } })),
-                });
+                if (promoted) {
+                    // Kept in its own section too (the Artists/Albums tabs list it);
+                    // the All view hides the repeat under the Top result.
+                    page.topBrowse = promoted.item;
+                    add(card);
+                } else {
+                    const endpoint = card.navigationEndpoint ?? card.title?.runs?.[0]?.navigationEndpoint ?? card.onTap;
+                    // Some song cards keep the video id only on their play button.
+                    const videoId = endpoint?.watchEndpoint?.videoId
+                        ?? card.buttons?.map((button: any) => button?.buttonRenderer?.command?.watchEndpoint?.videoId).find(Boolean)
+                        ?? card.thumbnailOverlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId;
+                    add({ ...card, navigationEndpoint: endpoint,
+                        playlistItemData: { videoId },
+                        flexColumns: [card.title, card.subtitle].map(text => ({ musicResponsiveListItemFlexColumnRenderer: { text } })),
+                    });
+                }
+                // Songs inside an artist's card often come without an artist
+                // line; they are that artist's songs.
+                const before = page.tracks.length;
                 walk(card.contents);
+                const cardArtist = promoted?.kind === 'artists' ? (promoted.item as Artist).name : '';
+                if (cardArtist) {
+                    for (const track of page.tracks.slice(before)) {
+                        if (!track.artist?.name) track.artist = { id: 0, name: cardArtist };
+                    }
+                }
             }
             if (item.musicResponsiveListItemRenderer) add(item.musicResponsiveListItemRenderer);
             if (item.musicTwoRowItemRenderer) add(item.musicTwoRowItemRenderer);
