@@ -2,7 +2,7 @@ import NetInfo from '@react-native-community/netinfo';
 import { appSettings, loadAppSettings, subscribeAppSettings } from '../store/appSettings';
 import { scrobbleIfHeard, sendNowPlaying } from '../services/listenbrainz';
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { Alert, StyleSheet } from 'react-native';
+import { Alert, DeviceEventEmitter, NativeModules, StyleSheet } from 'react-native';
 import Video, { VideoRef } from 'react-native-video';
 import RNFS from 'react-native-fs';
 import { API, getTidalProxyDashManifest, StreamData } from '../api';
@@ -911,6 +911,24 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         }
     }, [seek, startTrack]);
 
+    // Keep JS running in the background while music is wanted (see ApkInstaller.startKeepAlive).
+    useEffect(() => {
+        const native = NativeModules.ApkInstaller;
+        if (isPlaying) native?.startKeepAlive?.();
+        else native?.stopKeepAlive?.();
+    }, [isPlaying]);
+
+    // Next / Previous from the notification, lock screen, headphones or car.
+    const remoteRef = useRef({ next: () => playNext(), previous: () => playPrevious() });
+    remoteRef.current = { next: () => playNext(), previous: () => playPrevious() };
+    useEffect(() => {
+        const sub = DeviceEventEmitter.addListener('GroovixRemoteControl', (action: string) => {
+            if (action === 'next') remoteRef.current.next();
+            else if (action === 'previous') remoteRef.current.previous();
+        });
+        return () => sub.remove();
+    }, []);
+
     const addToQueue = useCallback((track: Track) => {
         syncQueue([...queueRef.current, track]);
     }, [syncQueue]);
@@ -977,6 +995,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         upNext,
     }), [addToQueue, currentTrack, isPlaying, playFromUpNext, playTrack, upNext]);
 
+    // The player stays mounted between songs, paused on the last stream, so the
+    // media session and its foreground service survive the switch. Without it
+    // Android drops the app's media status and, in the background, the next
+    // song never starts.
+    const heldUrlRef = useRef<string | null>(null);
+    if (streamUrl) heldUrlRef.current = streamUrl;
+    const playerUrl = streamUrl ?? heldUrlRef.current;
+
     return (
         <PlayerSummaryContext.Provider value={playerSummary}>
             <PlayerContext.Provider value={{
@@ -987,21 +1013,21 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                 setOnTrackEnd, verifiedFormat, lucidaProgress, usingFallback,
             }}>
                 {children}
-                {streamUrl && (
+                {playerUrl && (
                     <Video
                     ref={videoRef}
                     // A remote .mpd is DASH — tell the player explicitly, because
                     // it does not reliably infer DASH from the URL alone (the
                     // manifest would load but never start, stuck at 0:00).
                     source={{
-                        uri: streamUrl,
-                        ...(/\.mpd(\?|$)/i.test(streamUrl) ? { type: 'mpd' as const } : {}),
+                        uri: playerUrl,
+                        ...(/\.mpd(\?|$)/i.test(playerUrl) ? { type: 'mpd' as const } : {}),
                         metadata: mediaMetadata,
                     }}
-                    paused={!isPlaying}
+                    paused={!isPlaying || !streamUrl}
                     volume={volume}
                     onProgress={onProgress}
-                    progressUpdateInterval={500}
+                    progressUpdateInterval={250}
                     onLoad={onLoad}
                     onSeek={onSeek}
                     onBuffer={({ isBuffering: b }: any) => setIsBuffering(b)}

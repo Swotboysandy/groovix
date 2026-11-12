@@ -44,15 +44,101 @@ index e16ac96..206b3f2 100644
                          .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
                          .setEnableDecoderFallback(true)
                          .forceEnableMediaCodecAsynchronousQueueing();
+diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/RemoteControlHooks.java b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/RemoteControlHooks.java
+new file mode 100644
+index 0000000..1e5e74b
+--- /dev/null
++++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/RemoteControlHooks.java
+@@ -0,0 +1,13 @@
++package com.brentvatne.exoplayer;
++
++/**
++ * Groovix: the app's handlers for Next / Previous pressed on the notification,
++ * lock screen, headphones or a Bluetooth device. The player itself holds one
++ * song, so these go to the app's own queue.
++ */
++public final class RemoteControlHooks {
++    public static volatile Runnable onNext = null;
++    public static volatile Runnable onPrevious = null;
++
++    private RemoteControlHooks() {}
++}
 diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
-index 4760ea5..74f1ce9 100644
+index 4760ea5..86bcf40 100644
 --- a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
 +++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
-@@ -138,10 +138,45 @@ class VideoPlaybackService : MediaSessionService() {
+@@ -13,6 +13,8 @@ import android.os.Build
+ import android.os.Bundle
+ import android.os.IBinder
+ import androidx.core.app.NotificationCompat
++import androidx.media3.common.ForwardingPlayer
++import androidx.media3.common.Player
+ import androidx.media3.exoplayer.ExoPlayer
+ import androidx.media3.session.CommandButton
+ import androidx.media3.session.MediaSession
+@@ -56,10 +58,29 @@ class VideoPlaybackService : MediaSessionService() {
+         }
+         sourceActivity = from
+ 
+-        val mediaSession = MediaSession.Builder(this, player)
++        // Groovix: the session offers Next / Previous and hands them to the app's
++        // queue, so the notification, lock screen and headphones skip songs.
++        val queuePlayer = object : ForwardingPlayer(player) {
++            override fun getAvailableCommands(): Player.Commands =
++                super.getAvailableCommands().buildUpon()
++                    .add(Player.COMMAND_SEEK_TO_NEXT).add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
++                    .add(Player.COMMAND_SEEK_TO_PREVIOUS).add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
++                    .build()
++            override fun isCommandAvailable(command: Int): Boolean = when (command) {
++                Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
++                Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> true
++                else -> super.isCommandAvailable(command)
++            }
++            override fun hasNextMediaItem(): Boolean = true
++            override fun hasPreviousMediaItem(): Boolean = true
++            override fun seekToNext() { RemoteControlHooks.onNext?.run() }
++            override fun seekToNextMediaItem() { RemoteControlHooks.onNext?.run() }
++            override fun seekToPrevious() { RemoteControlHooks.onPrevious?.run() }
++            override fun seekToPreviousMediaItem() { RemoteControlHooks.onPrevious?.run() }
++        }
++        val mediaSession = MediaSession.Builder(this, queuePlayer)
+             .setId("RNVideoPlaybackService_" + player.hashCode())
+             .setCallback(VideoPlaybackCallback())
+-            .setCustomLayout(immutableListOf(seekForwardBtn, seekBackwardBtn))
+             .build()
+ 
+         mediaSessionsList[player] = mediaSession
+@@ -79,6 +100,9 @@ class VideoPlaybackService : MediaSessionService() {
+         }
+     }
+ 
++    private fun notificationIdOf(session: MediaSession): Int =
++        ((session.player as? ForwardingPlayer)?.wrappedPlayer ?: session.player).hashCode()
++
+     // Callbacks
+ 
+     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = null
+@@ -119,13 +143,13 @@ class VideoPlaybackService : MediaSessionService() {
+         }
+ 
+         if (session.player.currentMediaItem == null) {
+-            notificationManager.cancel(session.player.hashCode())
++            notificationManager.cancel(notificationIdOf(session))
+             return
+         }
+ 
+         val notification = buildNotification(session)
+ 
+-        notificationManager.notify(session.player.hashCode(), notification)
++        notificationManager.notify(notificationIdOf(session), notification)
+     }
+ 
+     private fun buildNotification(session: MediaSession): Notification {
+@@ -138,13 +162,48 @@ class VideoPlaybackService : MediaSessionService() {
           * On Android 12 and bellow we need to add controls manually
           */
          return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-+            val playerId = session.player.hashCode()
++            val playerId = notificationIdOf(session)
 +            fun actionIntent(action: COMMAND, requestCode: Int) = PendingIntent.getService(
 +                this,
 +                playerId * 10 + requestCode,
@@ -94,4 +180,17 @@ index 4760ea5..74f1ce9 100644
 +                .setOngoing(true)
                  .build()
          } else {
-             val playerId = session.player.hashCode()
+-            val playerId = session.player.hashCode()
++            val playerId = notificationIdOf(session)
+ 
+             // Action for COMMAND.SEEK_BACKWARD
+             val seekBackwardIntent = Intent(this, VideoPlaybackService::class.java).apply {
+@@ -265,7 +324,7 @@ class VideoPlaybackService : MediaSessionService() {
+                 return super.onStartCommand(intent, flags, startId)
+             }
+ 
+-            val session = mediaSessionsList.values.find { s -> s.player.hashCode() == playerId } ?: return super.onStartCommand(intent, flags, startId)
++            val session = mediaSessionsList.values.find { s -> notificationIdOf(s) == playerId } ?: return super.onStartCommand(intent, flags, startId)
+ 
+             handleCommand(commandFromString(actionCommand), session)
+         }

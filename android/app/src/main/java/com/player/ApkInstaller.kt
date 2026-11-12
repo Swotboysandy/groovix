@@ -28,6 +28,35 @@ class ApkInstaller(reactContext: ReactApplicationContext) :
 
     override fun getName() = "ApkInstaller"
 
+    // While music plays, a headless JS task keeps React Native's timers and
+    // rendering running in the background, so the next song starts as fast as
+    // in the foreground instead of waiting for the app to be opened again.
+    private var keepAliveTaskId: Int? = null
+
+    @ReactMethod
+    fun startKeepAlive() {
+        val context = reactApplicationContext
+        context.runOnUiQueueThread {
+            if (keepAliveTaskId != null) return@runOnUiQueueThread
+            try {
+                keepAliveTaskId = com.facebook.react.jstasks.HeadlessJsTaskContext.getInstance(context)
+                    .startTask(com.facebook.react.jstasks.HeadlessJsTaskConfig("GroovixKeepAlive", com.facebook.react.bridge.Arguments.createMap(), 0, true))
+            } catch (_: Exception) { }
+        }
+    }
+
+    @ReactMethod
+    fun stopKeepAlive() {
+        val context = reactApplicationContext
+        context.runOnUiQueueThread {
+            val id = keepAliveTaskId ?: return@runOnUiQueueThread
+            keepAliveTaskId = null
+            try {
+                com.facebook.react.jstasks.HeadlessJsTaskContext.getInstance(context).finishTask(id)
+            } catch (_: Exception) { }
+        }
+    }
+
     /** Posts "Update available" to the notification shade; tapping it opens Groovix. */
     @ReactMethod
     fun notifyUpdate(version: String, notes: String) {

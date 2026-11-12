@@ -26,6 +26,7 @@ import { restoreEqualizer } from './src/store/equalizer';
 // Push the saved equaliser tuning into the native processor before playback.
 void restoreEqualizer();
 import UpdatePrompt from './src/components/UpdatePrompt';
+import GoogleSignInNudge from './src/components/GoogleSignInNudge';
 import BrandIntro from './src/components/BrandIntro';
 import DeviceAccessGate from './src/components/DeviceAccessGate';
 import { PlayerProvider, usePlayerSummary } from './src/context/PlayerContext';
@@ -355,6 +356,7 @@ export default function App() {
                   <DialogProvider>
                     <ThemedNavigation />
                     <UpdatePrompt />
+                    <GoogleSignInNudge />
                   </DialogProvider>
                 </ThemeProvider>
               </JamProvider>

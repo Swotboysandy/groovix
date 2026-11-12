@@ -10,7 +10,7 @@ import Animated, {
     useSharedValue, useAnimatedStyle, withSpring,
     withTiming, Easing,
     runOnJS, runOnUI, interpolate, Extrapolation,
-    cancelAnimation, interpolateColor, FadeIn, FadeOut,
+    cancelAnimation, interpolateColor, FadeIn, FadeOut, Keyframe,
 } from 'react-native-reanimated';
 import RNFS from 'react-native-fs';
 import Ionicons from 'react-native-vector-icons/Ionicons';
@@ -122,6 +122,109 @@ async function fetchAndSaveLyrics(track: Track, lrcPath: string): Promise<void> 
             }
         } catch { }
     } catch { }
+}
+
+// BitChord's current-lyric strip: one line, 16sp/20 line height, the new line
+// rising from 35% below while the old one fades and rises 35% away (340ms,
+// fast-out-slow-in), each line dimming over the last part of its turn.
+const STRIP_HEIGHT = 28; // 20 line height + 4 + 4 padding
+const STRIP_SHIFT = Math.round(STRIP_HEIGHT * 0.35);
+const STRIP_EASE = Easing.bezier(0.4, 0, 0.2, 1);
+const LYRIC_IN = new Keyframe({
+    0: { transform: [{ translateY: STRIP_SHIFT }] },
+    100: { transform: [{ translateY: 0 }], easing: STRIP_EASE },
+}).duration(340);
+const LYRIC_OUT = new Keyframe({
+    0: { opacity: 1, transform: [{ translateY: 0 }] },
+    100: { opacity: 0, transform: [{ translateY: -STRIP_SHIFT }], easing: STRIP_EASE },
+}).duration(340);
+
+type StripWord = { text: string; time: number; endTime?: number };
+
+/** The line cut into one piece per timed word (the gap before a word joins it), with each word's timing. */
+function stripSegments(text: string, words: StripWord[]) {
+    const segments: { text: string; start: number; end: number }[] = [];
+    let pos = 0;
+    words.forEach((word, i) => {
+        const piece = word.text.trim();
+        if (!piece) return;
+        const at = text.indexOf(piece, pos);
+        if (at < 0) return;
+        const wordEnd = word.endTime && word.endTime > word.time ? word.endTime : (words[i + 1]?.time ?? word.time + 0.4);
+        segments.push({ text: text.slice(pos, at + piece.length), start: word.time, end: wordEnd });
+        pos = at + piece.length;
+    });
+    if (pos < text.length && segments.length) segments[segments.length - 1].text += text.slice(pos);
+    return segments;
+}
+
+/**
+ * BitChord's strip sweep: the sung part of the line at full white over the
+ * unsung part (0.55). The bright copy is revealed by a clip edge that the UI
+ * thread moves every frame, placed inside the word being sung by how far
+ * through that word the singer is, using each word's measured position.
+ */
+function SweptStripText({ text, words, time, playing, alpha }: { text: string; words: StripWord[]; time: number; playing: boolean; alpha: number }) {
+    const segments = useMemo(() => stripSegments(text, words), [text, words]);
+    const boxes = useRef<{ x: number; w: number }[]>([]);
+    const edge = useSharedValue(0);
+    const clock = useRef({ time, at: Date.now() });
+    useEffect(() => { clock.current = { time, at: Date.now() }; }, [time]);
+
+    useEffect(() => {
+        let frame = 0;
+        const tick = () => {
+            const now = clock.current.time + (playing ? Math.min(0.5, (Date.now() - clock.current.at) / 1000) : 0);
+            let x = 0;
+            for (let i = 0; i < segments.length; i += 1) {
+                const box = boxes.current[i];
+                if (!box) break;
+                const seg = segments[i];
+                if (now < seg.start) break;
+                const fraction = Math.min(1, (now - seg.start) / Math.max(0.05, seg.end - seg.start));
+                x = box.x + box.w * fraction;
+                if (fraction < 1) break;
+            }
+            edge.value = x;
+            if (playing) frame = requestAnimationFrame(tick);
+        };
+        tick();
+        return () => cancelAnimationFrame(frame);
+    }, [playing, segments, edge, time]);
+
+    const clipStyle = useAnimatedStyle(() => ({ width: edge.value }));
+    return (
+        <View style={[styles.lyricStripSweep, { opacity: alpha }]}>
+            {/* Measuring row: where each word sits on screen. */}
+            <View style={styles.lyricStripMeasure} pointerEvents="none">
+                {segments.map((seg, i) => (
+                    <Text key={i} style={[GX_TYPE.titleMedium, styles.lyricStrip]} onLayout={e => { boxes.current[i] = { x: e.nativeEvent.layout.x, w: e.nativeEvent.layout.width }; }}>{seg.text}</Text>
+                ))}
+            </View>
+            <Text style={[GX_TYPE.titleMedium, styles.lyricStrip, styles.lyricStripUnsung]} numberOfLines={1}>{text}</Text>
+            <Animated.View style={[styles.lyricStripSung, clipStyle]}>
+                <Text style={[GX_TYPE.titleMedium, styles.lyricStrip, styles.lyricStripSungText]} numberOfLines={1}>{text}</Text>
+            </Animated.View>
+        </View>
+    );
+}
+
+function LyricStripLine({ text, lineKey, start, end, time, playing, instrumental, reduceMotion, words }: {
+    text: string; lineKey: string; start: number; end: number; time: number; playing: boolean; instrumental: boolean; reduceMotion: boolean;
+    words?: StripWord[];
+}) {
+    const fade = Math.min(0.7, Math.max(0.16, (end - start) * 0.28));
+    const alpha = instrumental ? 0.5 : 0.78 * Math.min(1, Math.max(0, (end - time) / fade));
+    return (
+        <View style={styles.lyricStripLane}>
+            <Animated.View key={lineKey} entering={reduceMotion ? undefined : LYRIC_IN} exiting={reduceMotion ? undefined : LYRIC_OUT} style={styles.lyricStripLine}>
+                {instrumental && <Ionicons name="musical-notes" size={16} color="#FFFFFF" style={styles.lyricStripNote} />}
+                {words?.length && !instrumental
+                    ? <SweptStripText text={text} words={words} time={time} playing={playing} alpha={alpha} />
+                    : <Text style={[GX_TYPE.titleMedium, styles.lyricStrip, { opacity: alpha }]} numberOfLines={1}>{text}</Text>}
+            </Animated.View>
+        </View>
+    );
 }
 
 function AmbientBackground({ coverUrl, enabled }: { coverUrl: string; enabled: boolean }) {
@@ -873,10 +976,20 @@ export default function PlayerWidget() {
                                     <Text style={[GX_TYPE.titleMedium, styles.lyricSource]} numberOfLines={1}>{lyricsSource ? `Lyrics by ${lyricsSource}` : 'Lyrics'}</Text>
                                 ) : (
                                     <>
-                                        <Text style={[GX_TYPE.titleMedium, styles.lyricStrip]} numberOfLines={1}>
-                                            {lyricsLoading ? 'Looking for lyrics…' : currentLyricIndex >= 0 ? (lyrics[currentLyricIndex]?.text || '♪') : lyrics.length > 0 ? lyrics[0].text : ' '}
-                                        </Text>
-                                        {lyrics.length > 0 && <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.6)" />}
+                                        {(() => {
+                                            const synced = lyrics.some(line => line.time > 0);
+                                            const line = currentLyricIndex >= 0 ? lyrics[currentLyricIndex] : undefined;
+                                            const instrumental = synced && (!line || !line.text?.trim());
+                                            const text = lyricsLoading ? 'Looking for lyrics…'
+                                                : !synced ? (lyrics.length ? 'Open lyrics' : ' ')
+                                                : instrumental ? 'Instrumental' : line!.text;
+                                            const start = line?.time ?? 0;
+                                            const next = lyrics[currentLyricIndex + 1]?.time;
+                                            const end = next ?? (duration > start ? duration : start + 4);
+                                            const words = (line as { words?: { text: string; time: number }[] } | undefined)?.words;
+                                            return <LyricStripLine text={text} lineKey={`${currentTrack.id}-${currentLyricIndex}-${lyricsLoading}`} start={start} end={end} time={currentTime} playing={isPlaying} instrumental={instrumental || !synced} reduceMotion={settings.reduceAnimation} words={words} />;
+                                        })()}
+                                        {lyrics.length > 0 && <Ionicons name="chevron-forward" size={14} color="rgba(255,255,255,0.5)" />}
                                     </>
                                 )}
                             </TouchableOpacity>
@@ -1147,7 +1260,15 @@ const styles = StyleSheet.create({
     },
     titleGlyphs: { position: 'absolute', right: 32, flexDirection: 'row', gap: 10 },
     deck: { position: 'absolute', left: 0, right: 0, paddingHorizontal: 30 },
-    lyricStripRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+    lyricStripRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 4, borderRadius: 8, transform: [{ translateY: 6 }] },
+    lyricStripLane: { flexShrink: 1, height: 20, justifyContent: 'center' },
+    lyricStripLine: { flexDirection: 'row', alignItems: 'center' },
+    lyricStripNote: { marginRight: 6 },
+    lyricStripUnsung: { color: 'rgba(255,255,255,0.55)' },
+    lyricStripSweep: { flexShrink: 1 },
+    lyricStripMeasure: { position: 'absolute', left: 0, top: 0, flexDirection: 'row', opacity: 0 },
+    lyricStripSung: { position: 'absolute', left: 0, top: 0, bottom: 0, overflow: 'hidden' },
+    lyricStripSungText: { flexShrink: 0, width: 2000 },
     lyricSource: { color: 'rgba(255,255,255,0.75)', textDecorationLine: 'underline', paddingVertical: 2 },
     scrubRow: { flexDirection: 'row', height: 28 },
     volIcon: { marginHorizontal: 10 },
@@ -1161,7 +1282,7 @@ const styles = StyleSheet.create({
     outputCaption: { color: 'rgba(255,255,255,0.55)', textAlign: 'center', marginTop: 10 },
     queueModes: { alignSelf: 'flex-start', marginBottom: 8 },
     menuLabel: { marginLeft: 12, marginBottom: 0 },
-    lyricStrip: { flexShrink: 1, color: '#FFFFFF', paddingVertical: 2 },
+    lyricStrip: { flexShrink: 1, color: '#FFFFFF', fontSize: 16, lineHeight: 20 },
     skipTouch: { width: 53, height: 53, alignItems: 'center', justifyContent: 'center' },
     skipGlyph: { transform: [{ scaleY: 0.85 }] },
     playTouch: { width: 92, height: 92, alignItems: 'center', justifyContent: 'center' },

@@ -8,6 +8,8 @@ import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import androidx.media3.common.util.UnstableApi
 import com.brentvatne.exoplayer.AudioProcessorHooks
+import com.brentvatne.exoplayer.RemoteControlHooks
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.player.equalizer.EqualizerPackage
 import com.player.haptics.HapticsPackage
 import com.player.equalizer.EqualizerProcessor
@@ -33,6 +35,15 @@ class MainApplication : Application(), ReactApplication {
     super.onCreate()
     // Every player's audio sink runs through the shared equaliser.
     AudioProcessorHooks.processors = arrayOf(EqualizerProcessor.shared)
+    // Next / Previous from the notification, lock screen or headphones go to the app's queue.
+    RemoteControlHooks.onNext = Runnable { emitRemote("next") }
+    RemoteControlHooks.onPrevious = Runnable { emitRemote("previous") }
     loadReactNative(this)
+  }
+
+  private fun emitRemote(action: String) {
+    reactHost.currentReactContext
+      ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+      ?.emit("GroovixRemoteControl", action)
   }
 }
