@@ -27,6 +27,7 @@ class MainApplication : Application(), ReactApplication {
           add(ProfilePhotoPickerPackage())
           add(EqualizerPackage())
           add(HapticsPackage())
+          add(com.player.youtube.YouTubeAudioPackage())
         },
     )
   }

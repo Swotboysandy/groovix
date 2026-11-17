@@ -12,7 +12,31 @@ import { recordPlayedTrack } from '../store/listeningProfile';
 import { recordListening } from '../store/playHistory';
 import { getRadioRecommendations } from '../services/recommendations';
 import { appendRadioTracks } from '../services/musicMatching';
-import { isYouTubeOnly, resolveYouTubeTrack, trackIds } from '../services/ytmusic';
+import { isYouTubeOnly, resolveYouTubeTrack, seedVideoId, trackIds } from '../services/ytmusic';
+
+/**
+ * Last resort, like BitChord: the song's audio straight from YouTube, fetched
+ * on the phone by NewPipe Extractor (native YouTubeAudio module).
+ */
+async function youTubeStream(track: Track): Promise<StreamData | null> {
+    const native = NativeModules.YouTubeAudio;
+    if (!native?.resolve) return null;
+    try {
+        const videoId = track.ytVideoId || await seedVideoId(track);
+        if (!videoId) return null;
+        const got = await native.resolve(videoId);
+        if (!got?.url) return null;
+        const codec = String(got.codec || '').toUpperCase();
+        return {
+            url: got.url,
+            isDash: false,
+            format: { codec: codec === 'M4A' ? 'AAC' : codec || null, sampleRate: null, bitDepth: null, bitrate: Number(got.bitrate) ? Number(got.bitrate) * 1000 : null },
+            resolvedQuality: 'HIGH',
+        };
+    } catch {
+        return null;
+    }
+}
 
 /** Matches the next few YouTube songs ahead of time, so skipping to one is instant. */
 function prepareUpcoming(list: Track[]) {
@@ -385,7 +409,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         setVerifiedFormat(null);
         setIsBuffering(true);
         try {
-            const data = await API.getFreeFallbackStream(track);
+            const data = (await API.getFreeFallbackStream(track)) ?? (await youTubeStream(track));
             if (requestId !== streamRequestIdRef.current) return;
             if (!data) throw new Error('No matching free fallback is available');
             const url = await resolveStream(data, track.id);
