@@ -1053,6 +1053,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const onEnd = useCallback(async () => {
+        // One end per song. A second "ended" from the old stream (sent while the
+        // next song loads, or while the old stream is only held) must not skip
+        // the song that just started; neither must one in its first seconds.
+        if (endedRef.current || !streamUrl) return;
+        if (Date.now() - listenStartedAtRef.current < 4000) return;
         // ExoPlayer reports "not playing" at the end of a song; that is not the
         // listener pausing, so it must not stop the background keep-alive.
         endedRef.current = true;
@@ -1062,7 +1067,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             try { if (onTrackEndRef.current()) return; } catch { /* fall through */ }
         }
         advanceToNextTrack();
-    }, [advanceToNextTrack]);
+    }, [advanceToNextTrack, streamUrl]);
 
     // Metadata for the OS media session — drives the lock screen, notification-bar
     // controls, and iOS Control Center / Dynamic Island Now Playing card. imageUri must
