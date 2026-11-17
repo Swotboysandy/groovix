@@ -2,7 +2,7 @@ import NetInfo from '@react-native-community/netinfo';
 import { appSettings, loadAppSettings, subscribeAppSettings } from '../store/appSettings';
 import { scrobbleIfHeard, sendNowPlaying } from '../services/listenbrainz';
 import React, { createContext, useContext, useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { Alert, DeviceEventEmitter, NativeModules, StyleSheet } from 'react-native';
+import { DeviceEventEmitter, NativeModules, StyleSheet } from 'react-native';
 import Video, { VideoRef } from 'react-native-video';
 import RNFS from 'react-native-fs';
 import { API, getTidalProxyDashManifest, StreamData } from '../api';
@@ -21,6 +21,11 @@ function prepareUpcoming(list: Track[]) {
 
 /** Songs in a row that may fail before playback stops instead of skipping again. */
 const MAX_UNPLAYABLE_SKIPS = 4;
+
+/** Shown by PlayerNotices with the app's own dialog (this provider sits outside it). */
+function notice(title: string, message: string, icon: string) {
+    DeviceEventEmitter.emit('GroovixPlayerNotice', { title, message, icon });
+}
 /** Fresh-stream retries for a song that fails after it has started playing. */
 const MAX_MIDSONG_RETRIES = 2;
 /** How long a stream fetched ahead of time is trusted (signed URLs expire). */
@@ -289,7 +294,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         const current = currentTrackRef.current;
         if (current && pickedTrackIdRef.current === current.id) {
             pickedTrackIdRef.current = null;
-            Alert.alert('Song not available', `"${current.title}" can't be played right now. Try another version of it.`);
+            // No connection is not "song not found": say which it is.
+            NetInfo.fetch().then(state => {
+                if (state.isConnected === false || state.isInternetReachable === false) {
+                    notice('No internet connection', `Connect to the internet to play "${current.title}".`, 'cloud-offline-outline');
+                } else {
+                    notice('Song not available', `"${current.title}" can't be played right now. Try another version of it.`, 'musical-notes-outline');
+                }
+            }).catch(() => notice('Song not available', `"${current.title}" can't be played right now.`, 'musical-notes-outline'));
             return false;
         }
         if (unplayableSkipsRef.current >= MAX_UNPLAYABLE_SKIPS) return false;

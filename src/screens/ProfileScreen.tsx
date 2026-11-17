@@ -686,7 +686,7 @@ export default function ProfileScreen({ navigation, route }: any) {
                         <View style={s.modalHeader}>
                             <View style={{ flex: 1 }}>
                                 <Text style={[s.modalTitle, { color: colors.text }]}>Import playlist</Text>
-                                <Text style={[s.modalSubtitle, { color: colors.textMuted }]}>Paste a public Spotify, YouTube, Apple Music or TIDAL link.</Text>
+                                <Text style={[s.modalSubtitle, { color: colors.textMuted }]}>Paste a public Spotify, YouTube, Apple Music, JioSaavn, Deezer or TIDAL link.</Text>
                             </View>
                             <TouchableOpacity onPress={() => setImportModalVisible(false)} disabled={importing} hitSlop={{ top: 10, right: 10, bottom: 10, left: 10 }}>
                                 <Ionicons name="close" size={24} color={colors.textMuted} />

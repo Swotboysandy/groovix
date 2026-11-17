@@ -464,7 +464,7 @@ export default function AlbumDetailScreen({ route, navigation }: any) {
                     <TouchableOpacity style={glassStyles.capsuleButton} onPress={() => { Share.share({ message: title }); }} accessibilityRole="button" accessibilityLabel="Share">
                         <Ionicons name="share-outline" size={26} color="#FFFFFF" />
                     </TouchableOpacity>
-                    <TouchableOpacity style={glassStyles.capsuleButton} onPress={() => navigation.navigate('Library', { screen: 'Settings' })} accessibilityRole="button" accessibilityLabel="Profile">
+                    <TouchableOpacity style={glassStyles.capsuleButton} onPress={() => navigation.navigate('Library', { screen: 'Settings', initial: false })} accessibilityRole="button" accessibilityLabel="Profile">
                         <View style={glassStyles.capsuleAvatar}><Ionicons name="person" size={20} color="rgba(255,255,255,0.8)" /></View>
                     </TouchableOpacity>
                 </View>

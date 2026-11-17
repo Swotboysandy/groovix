@@ -24,6 +24,7 @@ import TouchableScale from './TouchableScale';
 import DraggableBottomSheet from './DraggableBottomSheet';
 import SkeletonPulse from './SkeletonPulse';
 import QueuePanel from './QueuePanel';
+import MarqueeText from './MarqueeText';
 import { useSongMenu } from './SongMenu';
 import { haptic } from '../services/haptics';
 import { updateAppSettings, useAppSettings } from '../store/appSettings';
@@ -949,8 +950,8 @@ export default function PlayerWidget() {
 
                     {/* MORPHING TEXT */}
                     <Animated.View style={[styles.textAbsolute, textInfoStyle]}>
-                        <Animated.Text style={[styles.trackTitle, titleStyle]} numberOfLines={1}>{currentTrack.title}</Animated.Text>
-                        <Animated.Text style={[styles.trackArtist, artistStyle]} numberOfLines={1}>{currentTrack.artist?.name}</Animated.Text>
+                        <MarqueeText text={currentTrack.title} style={styles.trackTitle} animatedStyle={titleStyle} measureStyle={styles.trackTitleFull} width={width - 64 - 60} active={playerExpanded} />
+                        <MarqueeText text={currentTrack.artist?.name || ''} style={styles.trackArtist} animatedStyle={artistStyle} measureStyle={styles.trackArtistFull} width={width - 64 - 60} active={playerExpanded} />
                     </Animated.View>
 
                     {/* MINI RIGHT CONTROLS */}
@@ -1279,6 +1280,8 @@ const styles = StyleSheet.create({
     textAbsolute: { position: 'absolute', top: 0, left: 0 },
     trackTitle: { fontFamily: 'SFProDisplay-Bold', color: '#fff', letterSpacing: -0.3 },
     trackArtist: { fontFamily: 'SFProDisplay-Medium', color: 'rgba(255,255,255,0.6)' },
+    trackTitleFull: { fontSize: 20, lineHeight: 25 },
+    trackArtistFull: { fontSize: 20, lineHeight: 25 },
 
     // FULL PLAYER STYLES 
     dragHandleRow: { alignItems: 'center', paddingVertical: 8 },

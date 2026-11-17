@@ -27,6 +27,7 @@ import { restoreEqualizer } from './src/store/equalizer';
 void restoreEqualizer();
 import UpdatePrompt from './src/components/UpdatePrompt';
 import GoogleSignInNudge from './src/components/GoogleSignInNudge';
+import PlayerNotices from './src/components/PlayerNotices';
 import BrandIntro from './src/components/BrandIntro';
 import DeviceAccessGate from './src/components/DeviceAccessGate';
 import { PlayerProvider, usePlayerSummary } from './src/context/PlayerContext';
@@ -357,6 +358,7 @@ export default function App() {
                     <ThemedNavigation />
                     <UpdatePrompt />
                     <GoogleSignInNudge />
+                    <PlayerNotices />
                   </DialogProvider>
                 </ThemeProvider>
               </JamProvider>

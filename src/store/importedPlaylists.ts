@@ -5,7 +5,7 @@ import { createSerialTaskQueue } from '../services/asyncTools';
 const KEY = 'groovix_imported_playlists_v1';
 const serializeWrite = createSerialTaskQueue();
 
-export type PlaylistPlatform = 'spotify' | 'youtube' | 'apple' | 'tidal';
+export type PlaylistPlatform = 'spotify' | 'youtube' | 'apple' | 'tidal' | 'jiosaavn' | 'deezer';
 
 export interface ImportedPlaylistTrack {
     title: string;

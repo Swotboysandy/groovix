@@ -37,7 +37,7 @@ export function ProfileCircle({ style }: { style?: StyleProp<ViewStyle> }) {
         <TouchableOpacity
             style={[glassStyles.circle, style]}
             activeOpacity={0.8}
-            onPress={() => navigation.navigate('Library', { screen: 'Settings' })}
+            onPress={() => navigation.navigate('Library', { screen: 'Settings', initial: false })}
             accessibilityRole="button"
             accessibilityLabel="Account and settings"
         >

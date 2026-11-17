@@ -24,7 +24,7 @@ const PROXYABLE_TIDAL_AUDIO_HOSTS = new Set([
 ]);
 // Public, credential-free catalog and streams used when the Tidal search mirror is unavailable.
 const AUDIUS_URL = 'https://api.audius.co/v1';
-const SAAVN_SEARCH_URL = 'https://rthmx.vercel.app/api/songs?q=';
+const SAAVN_SEARCH_URL = 'https://www.jiosaavn.com/api.php?__call=search.getResults&p=1&n=20&_format=json&_marker=0&api_version=4&ctx=web6dot0&q=';
 const SAAVN_DETAIL_URL = 'https://www.jiosaavn.com/api.php?__call=webapi.get&type=song&includeMetaTags=0&ctx=web6dot0&api_version=4&_format=json&_marker=0&token=';
 const API_TIMEOUT_MS = 12_000;
 const SEARCH_CACHE_TTL_MS = 2 * 60_000;
@@ -469,7 +469,9 @@ async function resolveViaSaavn(track: Track, quality: AppStreamQuality): Promise
     if (!title) return null;
 
     try {
-        const response = await fetchWithTimeout(`${SAAVN_SEARCH_URL}${encodeURIComponent(`${title} ${artist}`.trim())}`);
+        // Title without "(From …)" plus the first artist: JioSaavn ranks that best.
+        const query = `${title.replace(/\s*[([][^)\]]*[)\]]/g, '')} ${artist.split(/,|&/)[0]}`.trim();
+        const response = await fetchWithTimeout(`${SAAVN_SEARCH_URL}${encodeURIComponent(query)}`);
         if (!response.ok) return null;
         const items: any[] = (await response.json())?.results || [];
         const wantTitle = normalizeSongText(title);
@@ -477,7 +479,7 @@ async function resolveViaSaavn(track: Track, quality: AppStreamQuality): Promise
 
         const matches = items
             .filter(item => item?.perma_url && item?.title && Number(item?.more_info?.duration) > 35)
-            .filter(item => sameRecording({ title, artist, duration: track.duration }, {
+            .filter(item => looseSameRecording({ title, artist, duration: track.duration }, {
                 ...track,
                 title: String(item.title),
                 duration: Number(item.more_info.duration),
@@ -497,8 +499,9 @@ async function resolveViaSaavn(track: Track, quality: AppStreamQuality): Promise
             })
             .sort((a, b) => b.score - a.score);
 
+        // looseSameRecording already confirmed title, a shared artist and length.
         const best = matches[0];
-        if (!best || best.score < 16) return null;
+        if (!best) return null;
 
         // The rhythmax detail worker is gone (Cloudflare 1042); JioSaavn's own
         // web API returns the same song record from the perma URL's token.
@@ -1033,7 +1036,10 @@ export const API = {
         // The stream server (Qobuz addon API): a direct FLAC/MP3 file per track.
         if (typeof track !== 'number' && track.source === 'qobuz' && HIFI_API_URL) {
             const tier = QOBUZ_QUALITY[normalizeAppQuality(quality)] ?? 'lossless';
-            const res = await fetchWithTimeout(`${HIFI_API_URL}/stream/${encodeURIComponent(track.providerId || String(track.id))}?quality=${tier}`);
+            const streamUrl = `${HIFI_API_URL}/stream/${encodeURIComponent(track.providerId || String(track.id))}?quality=${tier}`;
+            // The free server is sometimes slow to answer: one retry before giving up.
+            let res = await fetchWithTimeout(streamUrl).catch(() => null);
+            if (!res || !res.ok) res = await fetchWithTimeout(streamUrl, undefined, 20000);
             if (!res.ok) throw new Error(`Qobuz stream ${res.status}`);
             const data = objectRecord(await res.json());
             if (typeof data.url !== 'string' || !data.url) throw new Error('Qobuz stream had no URL');
@@ -1170,6 +1176,13 @@ export const API = {
      * instrumentals and remixes never stand in for the original).
      */
     async resolveQobuz(source: { title: string; artist: string; durationSec?: number; album?: string }): Promise<Track | null> {
+        // One retry: the free server sometimes answers too slowly the first time.
+        const first = await API.resolveQobuzOnce(source, 8000);
+        return first === undefined ? ((await API.resolveQobuzOnce(source, 20000)) ?? null) : first;
+    },
+
+    /** The match, null when the server says there is none, undefined when it didn't answer. */
+    async resolveQobuzOnce(source: { title: string; artist: string; durationSec?: number; album?: string }, timeoutMs: number): Promise<Track | null | undefined> {
         if (!HIFI_API_URL || !source.title) return null;
         const toTrack = (item: any): Track | null => item?.id && item?.title ? {
             id: Number(item.id) || stableNumericId(`qobuz:${item.id}`),
@@ -1183,19 +1196,19 @@ export const API = {
         } : null;
         try {
             const query = `${source.title.replace(/\s*\([^)]*\)/g, '')} ${source.artist.split(',')[0]}`.trim();
-            const res = await fetchWithTimeout(`${HIFI_API_URL}/search?q=${encodeURIComponent(query)}&limit=15`, undefined, 8000);
+            const res = await fetchWithTimeout(`${HIFI_API_URL}/search?q=${encodeURIComponent(query)}&limit=15`, undefined, timeoutMs);
             const found: Track[] = res.ok ? (objectRecord(await res.json()).tracks as any[] ?? []).map(toTrack).filter((t: Track | null): t is Track => Boolean(t)) : [];
             const best = bestRecording({ title: source.title, artist: source.artist, duration: source.durationSec, album: source.album }, found)
                 ?? found.find(t => looseSameRecording({ title: source.title, artist: source.artist, duration: source.durationSec }, t, 3));
             if (best) return best;
             const params = new URLSearchParams({ title: source.title, artist: source.artist.split(',')[0] });
             if (source.durationSec) params.set('durationMs', String(Math.round(source.durationSec * 1000)));
-            const r = await fetchWithTimeout(`${HIFI_API_URL}/resolve?${params}`, undefined, 8000);
+            const r = await fetchWithTimeout(`${HIFI_API_URL}/resolve?${params}`, undefined, timeoutMs);
             if (!r.ok) return null;
             const item = toTrack(objectRecord(await r.json()).item);
             return item && looseSameRecording({ title: source.title, artist: source.artist, duration: source.durationSec }, item, 6) ? item : null;
         } catch {
-            return null;
+            return undefined;
         }
     },
 

@@ -150,16 +150,70 @@ async function readApple(url: string): Promise<SourcePlaylist> {
     return { title, cover, tracks };
 }
 
+/** A JioSaavn playlist through JioSaavn's own public web API (the link's last part is its token). */
+async function readJioSaavn(url: string): Promise<SourcePlaylist> {
+    const token = linkParts(url)?.path.split('/').filter(Boolean).pop();
+    if (!token) throw new Error('This is not a JioSaavn playlist link.');
+    const tracks: SourceTrack[] = [];
+    let title = 'JioSaavn playlist'; let cover = '';
+    for (let page = 1; page <= 10; page += 1) {
+        const api = `https://www.jiosaavn.com/api.php?__call=webapi.get&token=${encodeURIComponent(token)}&type=playlist&p=${page}&n=100&includeMetaTags=0&ctx=web6dot0&api_version=4&_format=json&_marker=0`;
+        const data = JSON.parse(await fetchText(api));
+        if (page === 1) { title = decode(data?.title || title); cover = data?.image || ''; }
+        const list: any[] = Array.isArray(data?.list) ? data.list : [];
+        list.forEach(song => {
+            const artists = song?.more_info?.artistMap?.primary_artists;
+            const artist = Array.isArray(artists) && artists.length ? artists.map((a: any) => decode(a.name)).join(', ') : decode(song?.subtitle || '');
+            if (song?.title && artist) tracks.push({ title: decode(song.title), artist, duration: Number(song?.more_info?.duration) || undefined });
+        });
+        const total = Number(data?.list_count) || 0;
+        if (list.length === 0 || tracks.length >= total) break;
+    }
+    return { title, cover: cover.replace(/150x150/, '500x500'), tracks };
+}
+
+/** A Deezer playlist through Deezer's public API. */
+async function readDeezer(url: string): Promise<SourcePlaylist> {
+    let target = url;
+    // Short share links (link.deezer.com, deezer.page.link) redirect to the playlist.
+    if (!/playlist\/\d+/.test(target)) {
+        const res = await fetch(url);
+        target = res.url || url;
+    }
+    const id = target.match(/playlist\/(\d+)/)?.[1];
+    if (!id) throw new Error('This is not a Deezer playlist link.');
+    const data = JSON.parse(await fetchText(`https://api.deezer.com/playlist/${id}`));
+    if (data?.error) throw new Error('This Deezer playlist is private or does not exist.');
+    const tracks: SourceTrack[] = [];
+    let page: any = data.tracks;
+    for (let i = 0; page && i < 20; i += 1) {
+        (page.data || []).forEach((t: any) => { if (t?.title && t?.artist?.name) tracks.push({ title: t.title, artist: t.artist.name, duration: Number(t.duration) || undefined }); });
+        page = page.next ? JSON.parse(await fetchText(page.next)) : null;
+    }
+    return { title: data.title || 'Deezer playlist', cover: data.picture_xl || data.picture_big || '', tracks };
+}
+
+/** scheme, user info, host (lower case) and path of an http(s) link, or null. */
+function linkParts(url: string): { scheme: string; userinfo: string; host: string; path: string } | null {
+    const m = url.trim().match(/^([a-z][a-z0-9+.-]*):\/\/(?:([^@/?#]*)@)?([^/?#:]+)(?::\d+)?([^?#]*)/i);
+    return m ? { scheme: m[1].toLowerCase(), userinfo: m[2] || '', host: m[3].toLowerCase(), path: m[4] || '/' } : null;
+}
+
 function platformFor(url: string): PlaylistPlatform {
-    let parsed: URL;
-    try { parsed = new URL(url); } catch { throw new Error('Paste a complete playlist link beginning with https://.'); }
-    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('Use a secure public playlist link.');
-    const host = parsed.hostname.toLowerCase();
+    // Parsed by hand: React Native's URL support differs from the web's and
+    // misread hosts, rejecting links that work in a browser.
+    const parts = linkParts(url);
+    if (!parts) throw new Error('Paste a complete playlist link beginning with https://.');
+    if (parts.scheme !== 'https' || parts.userinfo) throw new Error('Use a secure public playlist link.');
+    const host = parts.host;
     if (host === 'open.spotify.com') return 'spotify';
     if (['youtu.be', 'youtube.com', 'www.youtube.com', 'music.youtube.com', 'm.youtube.com'].includes(host)) return 'youtube';
     if (host === 'music.apple.com') return 'apple';
     if (['tidal.com', 'www.tidal.com', 'listen.tidal.com'].includes(host)) return 'tidal';
-    throw new Error('Paste a Spotify, YouTube Music, YouTube, Apple Music or TIDAL playlist link.');
+    if (host === 'www.jiosaavn.com' || host === 'jiosaavn.com') return 'jiosaavn';
+    if (host.endsWith('deezer.com') || host === 'deezer.page.link') return 'deezer';
+    if (host.includes('amazon.')) throw new Error("Amazon Music doesn't share its playlist songs publicly, so it can't be imported from a link yet.");
+    throw new Error('Paste a Spotify, YouTube Music, YouTube, Apple Music, JioSaavn, Deezer or TIDAL playlist link.');
 }
 
 const normalize = normalizeMusicText;
@@ -184,6 +238,14 @@ async function resolveTracks(source: SourceTrack[], onProgress?: (done: number, 
     return mapConcurrent(source, 3, async song => {
         let resolved: Track | undefined;
         try {
+            // The lossless stream server first: it matches by title, artist and length.
+            // A lookup failure (server down) must not skip the catalogue search below.
+            const qobuz = await Promise.resolve(API.resolveQobuz?.({ title: song.title, artist: song.artist, durationSec: song.duration })).catch(() => null);
+            if (qobuz) {
+                completed += 1;
+                onProgress?.(completed, source.length);
+                return { ...song, resolved: qobuz };
+            }
             let candidates = await API.search(`${song.title} ${song.artist}`);
             let best = candidates.filter(candidate => reliableMatch(song, candidate)).sort((a, b) => matchScore(song, b) - matchScore(song, a))[0];
             // Some catalog providers rank a long "title + all artists" query poorly.
@@ -209,6 +271,8 @@ export async function importPlaylistLink(rawUrl: string, onProgress?: (done: num
     if (platform === 'youtube') source = await readYouTube(url);
     else if (platform === 'spotify') source = await readSpotify(url);
     else if (platform === 'apple') source = await readApple(url);
+    else if (platform === 'jiosaavn') source = await readJioSaavn(url);
+    else if (platform === 'deezer') source = await readDeezer(url);
     else {
         const id = url.match(/playlist\/([A-Za-z0-9-]+)/)?.[1];
         if (!id) throw new Error('This is not a TIDAL playlist link.');
