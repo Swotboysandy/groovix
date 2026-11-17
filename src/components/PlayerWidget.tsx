@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {
     View, Text, StyleSheet, Image,
     ActivityIndicator, Dimensions, FlatList,
@@ -134,10 +134,6 @@ const LYRIC_IN = new Keyframe({
     0: { transform: [{ translateY: STRIP_SHIFT }] },
     100: { transform: [{ translateY: 0 }], easing: STRIP_EASE },
 }).duration(340);
-const LYRIC_OUT = new Keyframe({
-    0: { opacity: 1, transform: [{ translateY: 0 }] },
-    100: { opacity: 0, transform: [{ translateY: -STRIP_SHIFT }], easing: STRIP_EASE },
-}).duration(340);
 
 type StripWord = { text: string; time: number; endTime?: number };
 
@@ -215,9 +211,41 @@ function LyricStripLine({ text, lineKey, start, end, time, playing, instrumental
 }) {
     const fade = Math.min(0.7, Math.max(0.16, (end - start) * 0.28));
     const alpha = instrumental ? 0.5 : 0.78 * Math.min(1, Math.max(0, (end - time) / fade));
+    // The line leaving is drawn by us and always removed after its 340ms, so a
+    // quick run of changes (loading, Instrumental, the first line) can never
+    // leave an old line stuck under the new one.
+    type Leaving = { key: string; text: string; instrumental: boolean; alpha: number };
+    const [leaving, setLeaving] = useState<Leaving | null>(null);
+    const shown = useRef<Leaving>({ key: lineKey, text, instrumental, alpha });
+    const out = useSharedValue(1);
+    // Decided during render, so the leaving line is in the very same frame as
+    // the new one: no blink where it vanishes and then pops back.
+    let current = leaving;
+    if (shown.current.key !== lineKey && !reduceMotion) {
+        current = shown.current;
+        if (leaving?.key !== current.key) setLeaving(current);
+    }
+    useLayoutEffect(() => {
+        const previous = shown.current;
+        if (previous.key === lineKey || reduceMotion) { shown.current = { key: lineKey, text, instrumental, alpha }; return; }
+        out.value = 1;
+        out.value = withTiming(0, { duration: 340, easing: STRIP_EASE });
+        shown.current = { key: lineKey, text, instrumental, alpha };
+        const done = setTimeout(() => setLeaving(now => (now?.key === previous.key ? null : now)), 360);
+        return () => clearTimeout(done);
+    }, [lineKey]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Remember how dim the line already is, so it leaves from that brightness.
+    useEffect(() => { if (shown.current.key === lineKey) shown.current = { key: lineKey, text, instrumental, alpha }; });
+    const outStyle = useAnimatedStyle(() => ({ opacity: out.value, transform: [{ translateY: -STRIP_SHIFT * (1 - out.value) }] }));
     return (
         <View style={styles.lyricStripLane}>
-            <Animated.View key={lineKey} entering={reduceMotion ? undefined : LYRIC_IN} exiting={reduceMotion ? undefined : LYRIC_OUT} style={styles.lyricStripLine}>
+            {current && (
+                <Animated.View key={`out-${current.key}`} pointerEvents="none" style={[styles.lyricStripLine, styles.lyricStripLeaving, outStyle]}>
+                    {current.instrumental && <Ionicons name="musical-notes" size={16} color="#FFFFFF" style={styles.lyricStripNote} />}
+                    <Text style={[GX_TYPE.titleMedium, styles.lyricStrip, { opacity: current.alpha }]} numberOfLines={1}>{current.text}</Text>
+                </Animated.View>
+            )}
+            <Animated.View key={lineKey} entering={reduceMotion ? undefined : LYRIC_IN} style={styles.lyricStripLine}>
                 {instrumental && <Ionicons name="musical-notes" size={16} color="#FFFFFF" style={styles.lyricStripNote} />}
                 {words?.length && !instrumental
                     ? <SweptStripText text={text} words={words} time={time} playing={playing} alpha={alpha} />
@@ -1264,6 +1292,7 @@ const styles = StyleSheet.create({
     lyricStripLane: { flexShrink: 1, height: 20, justifyContent: 'center' },
     lyricStripLine: { flexDirection: 'row', alignItems: 'center' },
     lyricStripNote: { marginRight: 6 },
+    lyricStripLeaving: { position: 'absolute', left: 0, right: 0 },
     lyricStripUnsung: { color: 'rgba(255,255,255,0.55)' },
     lyricStripSweep: { flexShrink: 1 },
     lyricStripMeasure: { position: 'absolute', left: 0, top: 0, flexDirection: 'row', opacity: 0 },

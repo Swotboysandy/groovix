@@ -62,7 +62,7 @@ export interface Track {
     mediaMetadata?: {
         tags?: string[];
     };
-    source?: 'tidal' | 'audius' | 'audiomack' | 'lucida';
+    source?: 'tidal' | 'audius' | 'audiomack' | 'lucida' | 'qobuz';
     // Which upstream the service resolved this track from. 'tidal' means it came from the
     // search fallback (Deezer mirror down) and must be prepared via the Tidal pipeline.
     provider?: 'deezer' | 'tidal' | 'audius';

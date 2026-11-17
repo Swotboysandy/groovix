@@ -3,7 +3,7 @@ import { HIFI_API_URL, TIDAL_SEGMENT_PROXY_URL } from './config/private';
 import { appSettings, loadAppSettings } from './store/appSettings';
 import type { Album, Artist, CatalogSearchResult, Playlist, Track } from './types';
 import CryptoJS from 'crypto-js';
-import { normalizeMusicText, sameRecording } from './services/musicMatching';
+import { normalizeMusicText, sameRecording, bestRecording, looseSameRecording } from './services/musicMatching';
 import { catalogRequest, objectRecord } from './services/catalogRequest';
 import { fetchLyrics, LYRICS_SOURCES } from './services/lyrics';
 
@@ -656,6 +656,14 @@ async function searchTidalSection(parameter: 'a' | 'al' | 'p', key: 'artists' | 
     }
 }
 
+/** App quality names → the stream server's Qobuz tiers. */
+const QOBUZ_QUALITY: Record<string, string> = {
+    HI_RES_LOSSLESS: 'hi-res-24',
+    LOSSLESS: 'lossless',
+    HIGH: 'mp3',
+    LOW: 'mp3',
+};
+
 /** App quality names → the values the Tidal manifest API actually accepts. */
 const RHYTHMAX_QUALITY: Record<string, string> = {
     HI_RES_LOSSLESS: 'HI_RES',
@@ -1022,6 +1030,23 @@ export const API = {
         await loadAppSettings();
         const trackId = typeof track === 'number' ? track : track.id;
 
+        // The stream server (Qobuz addon API): a direct FLAC/MP3 file per track.
+        if (typeof track !== 'number' && track.source === 'qobuz' && HIFI_API_URL) {
+            const tier = QOBUZ_QUALITY[normalizeAppQuality(quality)] ?? 'lossless';
+            const res = await fetchWithTimeout(`${HIFI_API_URL}/stream/${encodeURIComponent(track.providerId || String(track.id))}?quality=${tier}`);
+            if (!res.ok) throw new Error(`Qobuz stream ${res.status}`);
+            const data = objectRecord(await res.json());
+            if (typeof data.url !== 'string' || !data.url) throw new Error('Qobuz stream had no URL');
+            const codec = String(data.codec || data.format || '').toUpperCase() || null;
+            const bitDepth = Number(data.bitDepth) || null;
+            return {
+                url: data.url,
+                isDash: false,
+                format: { codec, sampleRate: Number(data.sampleRate) || null, bitDepth, bitrate: null },
+                resolvedQuality: codec === 'MP3' ? 'HIGH' : bitDepth && bitDepth >= 24 ? 'HI_RES_LOSSLESS' : 'LOSSLESS',
+            };
+        }
+
         if (typeof track !== 'number' && track.source === 'audius' && track.providerId) {
             return {
                 url: `${AUDIUS_URL}/tracks/${encodeURIComponent(track.providerId)}/stream`,
@@ -1029,6 +1054,16 @@ export const API = {
                 format: { codec: 'MP3', sampleRate: null, bitDepth: null, bitrate: null },
                 resolvedQuality: 'HIGH',
             };
+        }
+
+        // Songs saved with an older catalogue id (Recents, Likes, playlists):
+        // find the same recording on the stream server first, since the TIDAL
+        // hosts below are often down.
+        if (typeof track !== 'number' && track.source !== 'qobuz' && track.source !== 'audius' && !track.localPath && HIFI_API_URL) {
+            const copy = await API.resolveQobuz({ title: track.title, artist: track.artist?.name || '', durationSec: track.duration || undefined, album: track.album?.title || undefined });
+            if (copy) {
+                try { return await API.getTrackStreamData(copy, quality); } catch { /* fall through to the catalogue hosts */ }
+            }
         }
 
         // Primary: rhythmax — Tidal HI_RES FLAC by the same Tidal track id, with
@@ -1127,6 +1162,41 @@ export const API = {
         const last = await viaHifi(MONOCHROME_URL);
         if (last) return last;
         throw new Error('No playable stream found');
+    },
+
+    /**
+     * The Qobuz recording for a title, artist and length: the server's own
+     * resolver first, then its search scored by bestRecording (so covers,
+     * instrumentals and remixes never stand in for the original).
+     */
+    async resolveQobuz(source: { title: string; artist: string; durationSec?: number; album?: string }): Promise<Track | null> {
+        if (!HIFI_API_URL || !source.title) return null;
+        const toTrack = (item: any): Track | null => item?.id && item?.title ? {
+            id: Number(item.id) || stableNumericId(`qobuz:${item.id}`),
+            providerId: String(item.id),
+            title: String(item.title),
+            duration: Number(item.duration) || 0,
+            artist: { id: 0, name: String(item.artist || '') },
+            album: { id: 0, title: String(item.album || ''), cover: String(item.artworkURL || '') },
+            isrc: item.isrc ? String(item.isrc) : undefined,
+            source: 'qobuz',
+        } : null;
+        try {
+            const query = `${source.title.replace(/\s*\([^)]*\)/g, '')} ${source.artist.split(',')[0]}`.trim();
+            const res = await fetchWithTimeout(`${HIFI_API_URL}/search?q=${encodeURIComponent(query)}&limit=15`, undefined, 8000);
+            const found: Track[] = res.ok ? (objectRecord(await res.json()).tracks as any[] ?? []).map(toTrack).filter((t: Track | null): t is Track => Boolean(t)) : [];
+            const best = bestRecording({ title: source.title, artist: source.artist, duration: source.durationSec, album: source.album }, found)
+                ?? found.find(t => looseSameRecording({ title: source.title, artist: source.artist, duration: source.durationSec }, t, 3));
+            if (best) return best;
+            const params = new URLSearchParams({ title: source.title, artist: source.artist.split(',')[0] });
+            if (source.durationSec) params.set('durationMs', String(Math.round(source.durationSec * 1000)));
+            const r = await fetchWithTimeout(`${HIFI_API_URL}/resolve?${params}`, undefined, 8000);
+            if (!r.ok) return null;
+            const item = toTrack(objectRecord(await r.json()).item);
+            return item && looseSameRecording({ title: source.title, artist: source.artist, duration: source.durationSec }, item, 6) ? item : null;
+        } catch {
+            return null;
+        }
     },
 
     async getFreeFallbackStream(track: Track): Promise<StreamData | null> {

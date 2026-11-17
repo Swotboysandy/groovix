@@ -542,15 +542,31 @@ export function trackIds(track: Track): number[] {
 }
 
 /** The playable recording for a YouTube song (cached), or null when none matches. */
+const qobuzMatches = new Map<string, Promise<Track | null>>();
+
 export function resolveYouTubeTrack(track: Track): Promise<Track | null> {
     if (!isYouTubeOnly(track)) return Promise.resolve(track);
+    const key = track.ytVideoId!;
+    let pending = qobuzMatches.get(key);
+    if (!pending) {
+        // The stream server matches by title, artist and length; the older
+        // catalogue match stays as the fallback.
+        pending = API.resolveQobuz({ title: track.title, artist: track.artist?.name || '', durationSec: track.duration || undefined, album: track.album?.title || undefined })
+            .then(found => found ?? catalogueMatch(track));
+        qobuzMatches.set(key, pending);
+        pending.then(found => { if (!found) qobuzMatches.delete(key); }, () => qobuzMatches.delete(key));
+    }
+    return pending.then(found => found ? { ...found, ytVideoId: track.ytVideoId } : null);
+}
+
+function catalogueMatch(track: Track): Promise<Track | null> {
     return matchTrack({
         videoId: track.ytVideoId!,
         title: track.title,
         artist: track.artist?.name || '',
         album: track.album?.title || undefined,
         durationSec: track.duration || undefined,
-    }).then(found => found ? { ...found, ytVideoId: track.ytVideoId } : null);
+    }).catch(() => null);
 }
 
 // ---- Matching onto TIDAL --------------------------------------------------

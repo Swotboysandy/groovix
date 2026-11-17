@@ -20,7 +20,11 @@ function prepareUpcoming(list: Track[]) {
 }
 
 /** Songs in a row that may fail before playback stops instead of skipping again. */
-const MAX_UNPLAYABLE_SKIPS = 5;
+const MAX_UNPLAYABLE_SKIPS = 4;
+/** Fresh-stream retries for a song that fails after it has started playing. */
+const MAX_MIDSONG_RETRIES = 2;
+/** How long a stream fetched ahead of time is trusted (signed URLs expire). */
+const PREFETCH_TTL_MS = 4 * 60 * 1000;
 
 export type StreamQuality = 'HI_RES_LOSSLESS' | 'LOSSLESS' | 'HIGH' | 'LOW';
 
@@ -183,6 +187,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const seekInFlightRef = useRef(false);
     const seekGuardTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const streamRequestIdRef = useRef(0);
+    // The next song's stream, fetched while the current one plays.
+    const prefetchRef = useRef<{ id: number; quality: string; at: number; data: StreamData } | null>(null);
+    const prefetchKeyRef = useRef<string | null>(null);
     // The preference and the confirmed quality of this track are separate. A
     // per-track fallback must not silently downgrade the next track as well.
     const qualityRef = useRef<StreamQuality>('LOSSLESS');
@@ -199,6 +206,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const lucidaFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lucidaBytesRef = useRef(0);
     const currentTrackRef = useRef<Track | null>(null);
+    // The <Video> element reloads only when its URI changes. A new stream with
+    // the same URI as the one held (a repeat, a quality switch, a fallback that
+    // returns the same address, the same manifest path) would be silently
+    // ignored and leave a spinner forever, so it gets a fragment: a different
+    // URI to the player, the same request to the network or the file system.
+    const heldUrlRef = useRef<string | null>(null);
+    const streamGenRef = useRef(0);
+    const manifestSeqRef = useRef(0);
+    const freshUrl = (url: string) => (url === heldUrlRef.current || url.split('#')[0] === heldUrlRef.current?.split('#')[0])
+        ? `${url.split('#')[0]}#g=${++streamGenRef.current}` : url;
     const lucidaRetriesRef = useRef(0);
     const previewRecoveryAttemptedRef = useRef(false);
     const directTidalDashUrlRef = useRef<string | null>(null);
@@ -212,7 +229,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const repeatModeRef = useRef<'off' | 'one' | 'all'>('off');
     const shuffleRef = useRef(false);
     const playSessionRef = useRef(0);
-    const advancePendingRef = useRef(false);
+    const advanceTokenRef = useRef(0);
+    const midSongRetriesRef = useRef(0);
+    // Set at a song's natural end until the next stream loads.
+    const endedRef = useRef(false);
     const radioRequestRef = useRef<{ session: number; promise: Promise<Track[]> } | null>(null);
     const fallbackRequestRef = useRef<number | null>(null);
 
@@ -289,7 +309,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const resolveStream = async (data: StreamData, trackId: number): Promise<string> => {
         if (data.isDash && data.dashXml) {
-            const mpdPath = `${RNFS.TemporaryDirectoryPath}/stream_${trackId}.mpd`;
+            // One file per request: a late, obsolete request must never overwrite
+            // the manifest the current stream is reading.
+            const mpdPath = `${RNFS.TemporaryDirectoryPath}/stream_${trackId}_${++manifestSeqRef.current}.mpd`;
             await RNFS.writeFile(mpdPath, data.dashXml, 'utf8');
             return `file://${mpdPath}`;
         }
@@ -340,6 +362,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // accepts a strong title + artist match, so a similar title cannot play the wrong song.
     const fallbackToDefaultSource = useCallback(async (track: Track, requestId = streamRequestIdRef.current) => {
         if (requestId !== streamRequestIdRef.current || fallbackRequestRef.current === requestId) return;
+        // Its own id, so a late answer from the stream it replaces can't win.
+        requestId = ++streamRequestIdRef.current;
         fallbackRequestRef.current = requestId;
         pendingSeekRef.current = currentTimeRef.current > 0 ? currentTimeRef.current : null;
         stopLucidaPoll();
@@ -359,7 +383,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                 resolvedQualityRef.current = data.resolvedQuality;
                 setQualityState(data.resolvedQuality);
             }
-            setStreamUrl(url);
+            setStreamUrl(freshUrl(url));
         } catch {
             if (requestId !== streamRequestIdRef.current) return;
             setIsBuffering(false);
@@ -397,7 +421,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             lucidaBytesRef.current = 0;
             if (track.localPath) {
                 const local = track.localPath.startsWith('file://') ? track.localPath : `file://${track.localPath}`;
-                setStreamUrl(local);
+                setStreamUrl(freshUrl(local));
                 setIsBuffering(false);
                 return;
             }
@@ -405,7 +429,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             // route was a rip on our own VPS, which has been reporting
             // "downloading" at zero bytes and then 500ing — it only ever added a
             // wait before failing, so it is gone rather than kept as a fallback.
-            const data = await API.getTrackStreamData(track, q);
+            // Use the stream fetched ahead of time for this song when it's still fresh.
+            const ready = prefetchRef.current;
+            const data = ready && ready.id === track.id && ready.quality === q && Date.now() - ready.at < PREFETCH_TTL_MS
+                ? ready.data : await API.getTrackStreamData(track, q);
+            if (ready?.id === track.id) prefetchRef.current = null;
             if (requestId !== streamRequestIdRef.current) return;
             if (/^https?:\/\/.*\.mpd(?:\?|$)/i.test(data.url)) {
                 directTidalDashUrlRef.current = data.url;
@@ -419,7 +447,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                 resolvedQualityRef.current = data.resolvedQuality;
                 setQualityState(data.resolvedQuality);
             }
-            setStreamUrl(url);
+            setStreamUrl(freshUrl(url));
         } catch (e: any) {
             if (requestId !== streamRequestIdRef.current) return;
             console.log('Stream error:', e);
@@ -475,6 +503,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             return;
         }
         playSessionRef.current += 1;
+        midSongRetriesRef.current = 0;
         const outgoing = resolvingFromRef.current !== undefined ? resolvingFromRef.current : currentTrackRef.current;
         resolvingFromRef.current = undefined;
         // Replay's log: what was actually heard of the outgoing track.
@@ -588,6 +617,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const onProgress = useCallback((data: any) => {
         if (seekInFlightRef.current) return;
+        // Audio is moving on the new source: stop treating paused events as stale,
+        // so a pause from the notification in the first seconds is honoured.
+        if (streamReloadingRef.current && data.currentTime > 0.5) {
+            streamReloadingRef.current = false;
+            if (streamReloadGuardTimerRef.current) clearTimeout(streamReloadGuardTimerRef.current);
+        }
         // Only steady forward ticks count as listening; seeks and stalls do not.
         const delta = data.currentTime - lastProgressRef.current;
         if (delta > 0 && delta <= 2.5) listenedMsRef.current += delta * 1000;
@@ -598,6 +633,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const onLoad = useCallback((data: any) => {
         unplayableSkipsRef.current = 0;
+        endedRef.current = false;
         const loadedDuration = Number(data.duration) || 0;
         const activeTrack = currentTrackRef.current;
         // Some upstream manifests are codec-valid FLAC but contain only a
@@ -670,6 +706,22 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // reconnecting to the same tailing stream a few times rather than treating it as fatal.
     const onVideoError = useCallback(async (e: any) => {
         console.log('Audio error:', JSON.stringify(e));
+        // While the next song resolves the old stream is only held; its errors don't count.
+        if (!streamUrl) return;
+        // A song that was already playing is never skipped for an error (its URL
+        // most likely expired): fetch a fresh stream and resume where it was.
+        const failing = currentTrackRef.current;
+        if (failing && currentTimeRef.current > 3 && midSongRetriesRef.current < MAX_MIDSONG_RETRIES) {
+            midSongRetriesRef.current += 1;
+            const resumeAt = currentTimeRef.current;
+            prefetchRef.current = null;
+            setTimeout(() => {
+                if (currentTrackRef.current !== failing) return;
+                fetchStream(failing, qualityRef.current);
+                pendingSeekRef.current = resumeAt;
+            }, 350);
+            return;
+        }
         const track = currentTrackRef.current;
         const directDashUrl = directTidalDashUrlRef.current;
         if (track && directDashUrl && !tidalProxyAttemptedRef.current) {
@@ -686,7 +738,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                     if (requestId !== streamRequestIdRef.current) return;
                     setStreamUrl(null);
                     setTimeout(() => {
-                        if (requestId === streamRequestIdRef.current) setStreamUrl(proxiedUrl);
+                        if (requestId === streamRequestIdRef.current) setStreamUrl(freshUrl(proxiedUrl));
                     }, 0);
                     return;
                 }
@@ -717,7 +769,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (skipUnplayable()) return;
         desiredPlayingRef.current = false;
         setIsPlaying(false);
-    }, [fallbackToDefaultSource, streamUrl, skipUnplayable]);
+    }, [fallbackToDefaultSource, fetchStream, streamUrl, skipUnplayable]);
 
     // Builds a diverse radio batch from public ListenBrainz/MusicBrainz similarity
     // signals, then blends in the user's on-device listening profile. The service has
@@ -799,9 +851,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // Shared "what plays next" logic, used by both natural track-end and manual skip.
     // Priority: repeat-one → user queue → auto-recommendations → (repeat-all replays) → stop.
     const advanceToNextTrack = useCallback(async (skippingUnplayable: boolean = false) => {
-        if (advancePendingRef.current) return;
-        advancePendingRef.current = true;
+        // Every call supersedes the one before it, so a Next pressed while an
+        // earlier one is still fetching is never dropped.
+        const token = ++advanceTokenRef.current;
         const session = playSessionRef.current;
+        const stale = () => token !== advanceTokenRef.current || session !== playSessionRef.current;
         try {
         const cur = currentTrackRef.current;
         if (repeatModeRef.current === 'one' && cur && !skippingUnplayable) { startTrack(cur, 0, false); return; }
@@ -823,20 +877,20 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
         if (autoQueueRef.current.length === 0) {
             const more = await buildRecommendations();
-            if (session !== playSessionRef.current) return;
+            if (stale()) return;
             autoQueueRef.current = appendRadioTracks(autoQueueRef.current, more, new Set(recentIdsRef.current));
             syncUpNext();
         }
         if (autoQueueRef.current.length === 0 && queueRef.current.length === 0) {
             await loadMoreUpNext();
-            if (session !== playSessionRef.current) return;
+            if (stale()) return;
         }
         if (autoQueueRef.current.length === 0 && queueRef.current.length === 0) {
             await new Promise<void>(resolve => setTimeout(resolve, 2000));
-            if (session !== playSessionRef.current) return;
+            if (stale()) return;
             usedSeedsRef.current.clear();
             await loadMoreUpNext();
-            if (session !== playSessionRef.current) return;
+            if (stale()) return;
         }
         // A song can be explicitly queued while recommendations are loading.
         // Re-check that priority after awaiting, rather than skipping past it.
@@ -856,12 +910,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         desiredPlayingRef.current = false;
         setIsPlaying(false);
         } catch {
-            if (session === playSessionRef.current) {
+            if (!stale()) {
                 desiredPlayingRef.current = false;
                 setIsPlaying(false);
                 setIsBuffering(false);
             }
-        } finally { advancePendingRef.current = false; }
+        }
     }, [startTrack, syncQueue, buildRecommendations, syncUpNext, loadMoreUpNext]);
 
     const playNext = useCallback((track?: Track) => {
@@ -901,22 +955,45 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const playPrevious = useCallback(() => {
         // Apple-Music behaviour: >4s in, first press restarts the current track; otherwise
         // pop the history stack. Restart when there's nothing to go back to.
-        if (currentTimeRef.current > 4) { seek(0); return; }
+        // Like BitChord: more than 10 seconds in, Previous restarts the song.
+        if (currentTimeRef.current > 10) { seek(0); return; }
         const prev = historyRef.current[0];
         if (prev) {
             historyRef.current = historyRef.current.slice(1);
+            // Next from here returns to the song we came from.
+            const cur = currentTrackRef.current;
+            if (cur) syncQueue([cur, ...queueRef.current]);
             startTrack(prev, 0, false);
         } else {
             seek(0);
         }
-    }, [seek, startTrack]);
+    }, [seek, startTrack, syncQueue]);
+
+    // Fetch the next song's stream while this one plays, so Next starts at once.
+    useEffect(() => {
+        const next = upNext[0];
+        if (!next || next.localPath || next.source === 'audius') return;
+        const wanted = qualityRef.current;
+        const key = `${next.id}:${wanted}`;
+        if (prefetchKeyRef.current === key) return;
+        prefetchKeyRef.current = key;
+        // Not cancelled when the list re-renders: the result is kept only while
+        // this song is still the one coming up, and a failure allows a retry.
+        (async () => {
+            const real = await resolveYouTubeTrack(next).catch(() => null);
+            const data = real && !isYouTubeOnly(real) ? await API.getTrackStreamData(real, wanted).catch(() => null) : null;
+            if (prefetchKeyRef.current !== key) return;
+            if (real && data) prefetchRef.current = { id: real.id, quality: wanted, at: Date.now(), data };
+            else prefetchKeyRef.current = null;
+        })();
+    }, [upNext, quality]);
 
     // Keep JS running in the background while music is wanted (see ApkInstaller.startKeepAlive).
     useEffect(() => {
         const native = NativeModules.ApkInstaller;
-        if (isPlaying) native?.startKeepAlive?.();
+        if (isPlaying || desiredPlayingRef.current) native?.startKeepAlive?.();
         else native?.stopKeepAlive?.();
-    }, [isPlaying]);
+    }, [isPlaying, streamUrl]);
 
     // Next / Previous from the notification, lock screen, headphones or car.
     const remoteRef = useRef({ next: () => playNext(), previous: () => playPrevious() });
@@ -964,6 +1041,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const onEnd = useCallback(async () => {
+        // ExoPlayer reports "not playing" at the end of a song; that is not the
+        // listener pausing, so it must not stop the background keep-alive.
+        endedRef.current = true;
+        lastTransportIntentAtRef.current = Date.now();
         // Jam (or any registered owner) gets first say on what happens at track end.
         if (onTrackEndRef.current) {
             try { if (onTrackEndRef.current()) return; } catch { /* fall through */ }
@@ -999,7 +1080,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // media session and its foreground service survive the switch. Without it
     // Android drops the app's media status and, in the background, the next
     // song never starts.
-    const heldUrlRef = useRef<string | null>(null);
     if (streamUrl) heldUrlRef.current = streamUrl;
     const playerUrl = streamUrl ?? heldUrlRef.current;
 
@@ -1021,7 +1101,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                     // manifest would load but never start, stuck at 0:00).
                     source={{
                         uri: playerUrl,
-                        ...(/\.mpd(\?|$)/i.test(playerUrl) ? { type: 'mpd' as const } : {}),
+                        ...(/\.mpd(?:[?#]|$)/i.test(playerUrl) ? { type: 'mpd' as const } : {}),
                         metadata: mediaMetadata,
                     }}
                     paused={!isPlaying || !streamUrl}
@@ -1042,6 +1122,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
                         // stale native state while a source is being replaced or immediately
                         // after an in-app tap; the user's intent is authoritative then.
                         if (typeof playing !== 'boolean') return;
+                        // Between songs the old stream is only held: a "play" from the
+                        // notification must not restart it, and its "stopped" is not a pause.
+                        if (!streamUrl || endedRef.current) {
+                            if (playing && !streamUrl) videoRef.current?.pause();
+                            return;
+                        }
                         const contradictsRecentTap = Date.now() - lastTransportIntentAtRef.current < 600
                             && playing !== desiredPlayingRef.current;
                         const contradictsSeek = seekInFlightRef.current

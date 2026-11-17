@@ -18,7 +18,7 @@ index 0000000..f2e66ca
 +    private AudioProcessorHooks() {}
 +}
 diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java
-index e16ac96..206b3f2 100644
+index e16ac96..73fcfca 100644
 --- a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java
 +++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/ReactExoplayerView.java
 @@ -730,8 +730,21 @@ public class ReactExoplayerView extends FrameLayout implements
@@ -44,6 +44,38 @@ index e16ac96..206b3f2 100644
                          .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF)
                          .setEnableDecoderFallback(true)
                          .forceEnableMediaCodecAsynchronousQueueing();
+@@ -755,6 +768,8 @@ public class ReactExoplayerView extends FrameLayout implements
+                 .setBandwidthMeter(bandwidthMeter)
+                 .setLoadControl(loadControl)
+                 .setMediaSourceFactory(mediaSourceFactory)
++                // Groovix: keep the CPU and Wi-Fi awake while audio plays with the screen off.
++                .setWakeMode(C.WAKE_MODE_NETWORK)
+                 .build();
+         ReactNativeVideoManager.Companion.getInstance().onInstanceCreated(instanceId, player);
+         refreshDebugState();
+@@ -1937,13 +1952,21 @@ public class ReactExoplayerView extends FrameLayout implements
+         eventEmitter.onVolumeChange.invoke(volume);
+     }
+ 
++    @Override
++    public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
++        // Groovix: pause/play from the notification, headphones or a focus loss.
++        eventEmitter.onVideoPlaybackStateChanged.invoke(playWhenReady, isSeeking);
++    }
++
+     @Override
+     public void onIsPlayingChanged(boolean isPlaying) {
+         if (isPlaying && isSeeking) {
+             eventEmitter.onVideoSeek.invoke(player.getCurrentPosition(), seekPosition);
+         }
+         PictureInPictureUtil.applyPlayingStatus(themedReactContext, pictureInPictureParamsBuilder, pictureInPictureReceiver, !isPlaying);
+-        eventEmitter.onVideoPlaybackStateChanged.invoke(isPlaying, isSeeking);
++        // Groovix: report the play/pause intent, not whether audio is moving right now;
++        // a buffering stall is not the listener pressing pause.
++        eventEmitter.onVideoPlaybackStateChanged.invoke(player.getPlayWhenReady(), isSeeking);
+ 
+         if (isPlaying) {
+             isSeeking = false;
 diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/RemoteControlHooks.java b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/RemoteControlHooks.java
 new file mode 100644
 index 0000000..1e5e74b
@@ -64,7 +96,7 @@ index 0000000..1e5e74b
 +    private RemoteControlHooks() {}
 +}
 diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
-index 4760ea5..86bcf40 100644
+index 4760ea5..c3a1d7e 100644
 --- a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
 +++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
 @@ -13,6 +13,8 @@ import android.os.Build
@@ -185,7 +217,21 @@ index 4760ea5..86bcf40 100644
  
              // Action for COMMAND.SEEK_BACKWARD
              val seekBackwardIntent = Intent(this, VideoPlaybackService::class.java).apply {
-@@ -265,7 +324,7 @@ class VideoPlaybackService : MediaSessionService() {
+@@ -247,8 +306,12 @@ class VideoPlaybackService : MediaSessionService() {
+     }
+ 
+     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++        // Groovix: the placeholder only stands in until a session exists; after
++        // that it would become a second, never-cancelled media notification.
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+-            startForeground(PLACEHOLDER_NOTIFICATION_ID, createPlaceholderNotification())
++            val session = mediaSessionsList.values.firstOrNull()
++            if (session == null) startForeground(PLACEHOLDER_NOTIFICATION_ID, createPlaceholderNotification())
++            else startForeground(notificationIdOf(session), buildNotification(session))
+         }
+ 
+         intent?.let {
+@@ -265,7 +328,7 @@ class VideoPlaybackService : MediaSessionService() {
                  return super.onStartCommand(intent, flags, startId)
              }
  
