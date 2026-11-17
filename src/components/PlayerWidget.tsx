@@ -638,6 +638,17 @@ export default function PlayerWidget() {
         }
     }, [currentLyricIndex, showLyrics]);
 
+    // A line far below the rows measured so far: jump near it, then aim again
+    // once those rows exist (a seek near the end of a long song).
+    const onLyricsScrollFailed = useCallback((info: { index: number; averageItemLength: number }) => {
+        lyricsListRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
+        setTimeout(() => {
+            try {
+                lyricsListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.35 });
+            } catch { }
+        }, 250);
+    }, []);
+
     useEffect(() => {
         const sub = BackHandler.addEventListener('hardwareBackPress', () => {
             if (dragY.value < MINIMIZED_Y * 0.5) {
@@ -1188,7 +1199,7 @@ export default function PlayerWidget() {
                             ) : lyrics.length === 0 ? (
                                 <View style={styles.lyricsCentered}><MaterialIcons name="lyrics" size={48} color="rgba(255,255,255,0.3)" /><Text style={styles.lyricsEmptyText}>No lyrics available</Text></View>
                             ) : (
-                                <FlatList ref={lyricsListRef} data={lyrics} renderItem={renderLyricLine} keyExtractor={(_, i) => `lyric-${i}`} showsVerticalScrollIndicator={false} contentContainerStyle={styles.lyricsListContent} />
+                                <FlatList ref={lyricsListRef} data={lyrics} renderItem={renderLyricLine} keyExtractor={(_, i) => `lyric-${i}`} onScrollToIndexFailed={onLyricsScrollFailed} showsVerticalScrollIndicator={false} contentContainerStyle={styles.lyricsListContent} />
                             )}
                         </Animated.View>
                     )}

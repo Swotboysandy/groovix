@@ -41,6 +41,7 @@ export function sameRecording(source: Recording, candidate: Track): boolean {
  * when both lengths are known, they are within a few seconds.
  */
 export function looseSameRecording(source: Recording, candidate: Track, toleranceSec = 6): boolean {
+    if (unwantedNonVocal(source.title, candidate)) return false;
     if (sameRecording(source, candidate)) return true;
     const a = recordingTitle(source.title);
     const b = recordingTitle(candidate.title);
@@ -54,6 +55,12 @@ export function looseSameRecording(source: Recording, candidate: Track, toleranc
     return true;
 }
 
+/** Instrumental and karaoke editions have no vocals: never a match for a vocal song. */
+const NON_VOCAL = /(instrumental|karaoke)/i;
+function unwantedNonVocal(wanted: string, candidate: Track): boolean {
+    return NON_VOCAL.test(`${candidate.title} ${candidate.album?.title ?? ''}`) && !NON_VOCAL.test(wanted);
+}
+
 type ScoredRecording = Recording & { album?: string; explicit?: boolean };
 
 /** Words that mark a different take of a song: covers, instrumentals, karaoke, lo-fi, string versions. */
@@ -65,6 +72,7 @@ export function bestRecording(source: ScoredRecording, candidates: Track[]): Tra
     let bestScore = -Infinity;
     for (const candidate of candidates) {
         if (!sameRecording(source, candidate)) continue;
+        if (unwantedNonVocal(`${source.title} ${source.album ?? ''}`, candidate)) continue;
         let score = 0;
         if (source.duration && candidate.duration) score -= Math.abs(source.duration - candidate.duration);
         if (source.album && candidate.album?.title && normalizeMusicText(source.album) === normalizeMusicText(candidate.album.title)) score += 35;

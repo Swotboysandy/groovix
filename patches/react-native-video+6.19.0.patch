@@ -96,7 +96,7 @@ index 0000000..1e5e74b
 +    private RemoteControlHooks() {}
 +}
 diff --git a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
-index 4760ea5..c3a1d7e 100644
+index 4760ea5..9866df8 100644
 --- a/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
 +++ b/node_modules/react-native-video/android/src/main/java/com/brentvatne/exoplayer/VideoPlaybackService.kt
 @@ -13,6 +13,8 @@ import android.os.Build
@@ -240,3 +240,15 @@ index 4760ea5..c3a1d7e 100644
  
              handleCommand(commandFromString(actionCommand), session)
          }
+@@ -301,8 +364,9 @@ class VideoPlaybackService : MediaSessionService() {
+             // TODO: get somehow ControlsConfig here - for now hardcoded 10000ms
+ 
+             when (command) {
+-                COMMAND.SEEK_BACKWARD -> session.player.seekTo(session.player.contentPosition - SEEK_INTERVAL_MS)
+-                COMMAND.SEEK_FORWARD -> session.player.seekTo(session.player.contentPosition + SEEK_INTERVAL_MS)
++                // The app's queue owns previous/next; seek only when nothing is listening.
++                COMMAND.SEEK_BACKWARD -> RemoteControlHooks.onPrevious?.run() ?: session.player.seekTo(session.player.contentPosition - SEEK_INTERVAL_MS)
++                COMMAND.SEEK_FORWARD -> RemoteControlHooks.onNext?.run() ?: session.player.seekTo(session.player.contentPosition + SEEK_INTERVAL_MS)
+                 COMMAND.TOGGLE_PLAY -> handleCommand(if (session.player.isPlaying) COMMAND.PAUSE else COMMAND.PLAY, session)
+                 COMMAND.PLAY -> session.player.play()
+                 COMMAND.PAUSE -> session.player.pause()

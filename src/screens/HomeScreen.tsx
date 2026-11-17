@@ -99,6 +99,8 @@ export default function HomeScreen({ navigation }: any) {
         const gen = ++generation.current;
         continuation.current = null;
         publishedCount.current = 0;
+        // A page that was loading belongs to the old Home; don't let it block paging.
+        setLoadingMore(false);
         // A cached Home stays on screen until fresh shelves replace it.
         if (!showingCache.current) { shelvesRef.current = []; setShelves([]); }
         setFailed(false);

@@ -14,6 +14,15 @@ import { getRadioRecommendations } from '../services/recommendations';
 import { appendRadioTracks } from '../services/musicMatching';
 import { isYouTubeOnly, resolveYouTubeTrack, seedVideoId, trackIds } from '../services/ytmusic';
 
+function shuffled<T>(list: T[]): T[] {
+    const out = list.slice();
+    for (let i = out.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+}
+
 /**
  * Last resort, like BitChord: the song's audio straight from YouTube, fetched
  * on the phone by NewPipe Extractor (native YouTubeAudio module).
@@ -252,6 +261,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     // Queue + history live in refs (read inside async advance logic without stale closures);
     // the `queue` state above mirrors queueRef purely so the UI re-renders.
     const queueRef = useRef<Track[]>([]);
+    // The playlist being played, in its own order, so Repeat All can start it over.
+    const playlistRef = useRef<Track[]>([]);
+    // The queue's order before shuffle was turned on, to put it back.
+    const unshuffledRef = useRef<Track[] | null>(null);
     const historyRef = useRef<Track[]>([]);            // stack of previously-played tracks
     const autoQueueRef = useRef<Track[]>([]);          // algorithm-generated recommendations
     const recentIdsRef = useRef<number[]>([]);         // last ~40 played ids, to avoid repeats
@@ -264,6 +277,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const endedRef = useRef(false);
     const radioRequestRef = useRef<{ session: number; promise: Promise<Track[]> } | null>(null);
     const fallbackRequestRef = useRef<number | null>(null);
+    const fallbackStageRef = useRef<'youtube' | 'other' | null>(null);
 
     useEffect(() => {
         let active = true;
@@ -396,8 +410,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     // Credential-free fallback for a temporarily unavailable primary source. It only
     // accepts a strong title + artist match, so a similar title cannot play the wrong song.
-    const fallbackToDefaultSource = useCallback(async (track: Track, requestId = streamRequestIdRef.current) => {
-        if (requestId !== streamRequestIdRef.current || fallbackRequestRef.current === requestId) return;
+    const fallbackToDefaultSource = useCallback(async (track: Track, requestId = streamRequestIdRef.current, skipYouTube = false) => {
+        if (requestId !== streamRequestIdRef.current || (fallbackRequestRef.current === requestId && !skipYouTube)) return;
         // Its own id, so a late answer from the stream it replaces can't win.
         requestId = ++streamRequestIdRef.current;
         fallbackRequestRef.current = requestId;
@@ -409,8 +423,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         setVerifiedFormat(null);
         setIsBuffering(true);
         try {
-            const data = (await youTubeStream(track)) ?? (await API.getFreeFallbackStream(track));
+            const yt = skipYouTube ? null : await youTubeStream(track);
+            const data = yt ?? (await API.getFreeFallbackStream(track));
             if (requestId !== streamRequestIdRef.current) return;
+            fallbackStageRef.current = yt ? 'youtube' : 'other';
             if (!data) throw new Error('No matching free fallback is available');
             const url = await resolveStream(data, track.id);
             if (requestId !== streamRequestIdRef.current) return;
@@ -434,6 +450,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const fetchStream = useCallback(async (track: Track, q: StreamQuality) => {
         const requestId = ++streamRequestIdRef.current;
         fallbackRequestRef.current = null;
+        fallbackStageRef.current = null;
         // Artwork must not hold downloaded/ready audio hostage for up to 1.8s.
         // Publish the stable local cover to the media session when it arrives.
         void prepareNotificationArtwork(track).then(artwork => {
@@ -580,6 +597,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const playTrack = useCallback((track: Track, startAt: number = 0) => {
         pickedTrackIdRef.current = track.id;
+        playlistRef.current = [];
         autoQueueRef.current = [];
         syncUpNext();
         startTrack(track, startAt, true);
@@ -589,7 +607,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (!Number.isInteger(startIndex) || startIndex < 0 || !tracks[startIndex]) return;
         pickedTrackIdRef.current = tracks[startIndex].id;
         autoQueueRef.current = [];
-        syncQueue(tracks.slice(startIndex + 1));
+        playlistRef.current = tracks.slice();
+        unshuffledRef.current = null;
+        let rest = tracks.slice(startIndex + 1);
+        if (shuffleRef.current) {
+            unshuffledRef.current = rest;
+            rest = shuffled(rest);
+        }
+        syncQueue(rest);
         startTrack(tracks[startIndex], 0, true);
     }, [startTrack, syncQueue]);
 
@@ -676,11 +701,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         // 30-second preview. Never present that as the requested full song.
         // Recover once through the exact-match public source, which reports
         // its real MP3 format and provides the complete track when available.
+        // Only when the song is known to be much longer: real short tracks and
+        // downloaded files are left alone.
+        const expected = Number(activeTrack?.duration) || 0;
         if (
             loadedDuration > 0
             && loadedDuration <= 35
+            && expected > loadedDuration + 20
             && !previewRecoveryAttemptedRef.current
             && activeTrack
+            && !activeTrack.localPath
         ) {
             previewRecoveryAttemptedRef.current = true;
             if (activeTrack.localPath) {
@@ -800,6 +830,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             void fallbackToDefaultSource(track);
             return;
         }
+        // The YouTube stream itself failed (e.g. 403): JioSaavn is still left to try.
+        if (track && fallbackStageRef.current === 'youtube') {
+            fallbackStageRef.current = 'other';
+            void fallbackToDefaultSource(track, streamRequestIdRef.current, true);
+            return;
+        }
         setIsBuffering(false);
         streamReloadingRef.current = false;
         if (skipUnplayable()) return;
@@ -886,7 +922,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     // Shared "what plays next" logic, used by both natural track-end and manual skip.
     // Priority: repeat-one → user queue → auto-recommendations → (repeat-all replays) → stop.
-    const advanceToNextTrack = useCallback(async (skippingUnplayable: boolean = false) => {
+    const advanceToNextTrack = useCallback(async (skippingUnplayable: boolean = false, manual: boolean = false) => {
         // Every call supersedes the one before it, so a Next pressed while an
         // earlier one is still fetching is never dropped.
         const token = ++advanceTokenRef.current;
@@ -894,12 +930,22 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         const stale = () => token !== advanceTokenRef.current || session !== playSessionRef.current;
         try {
         const cur = currentTrackRef.current;
-        if (repeatModeRef.current === 'one' && cur && !skippingUnplayable) { startTrack(cur, 0, false); return; }
+        // Repeat One replays only when the song ends by itself; Next still moves on.
+        if (repeatModeRef.current === 'one' && cur && !skippingUnplayable && !manual) { startTrack(cur, 0, false); return; }
 
         if (queueRef.current.length > 0) {
             const [next, ...rest] = queueRef.current;
             syncQueue(rest);
             startTrack(next, 0, true);
+            return;
+        }
+
+        // Repeat All with a playlist: start the playlist over (before any radio).
+        if (repeatModeRef.current === 'all' && playlistRef.current.length > 0) {
+            const order = shuffleRef.current ? shuffled(playlistRef.current) : playlistRef.current;
+            const [first, ...rest] = order;
+            syncQueue(rest);
+            startTrack(first, 0, true);
             return;
         }
 
@@ -958,7 +1004,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         // Manual skip shouldn't hand control to the jam owner — that's only for natural
         // end-of-track. A track arg jumps straight to it; otherwise advance the queue.
         if (track) { autoQueueRef.current = []; syncUpNext(); startTrack(track, 0, true); return; }
-        advanceToNextTrack();
+        advanceToNextTrack(false, true);
     }, [startTrack, advanceToNextTrack, syncUpNext]);
     skipUnplayableRef.current = () => { void advanceToNextTrack(true); };
 
@@ -1073,15 +1119,33 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const toggleShuffle = useCallback(() => {
-        setShuffle(prev => { shuffleRef.current = !prev; return !prev; });
-    }, []);
+        const on = !shuffleRef.current;
+        shuffleRef.current = on;
+        setShuffle(on);
+        // Reorder what is already waiting, not only future radio batches.
+        if (on) {
+            unshuffledRef.current = queueRef.current.slice();
+            syncQueue(shuffled(queueRef.current));
+            autoQueueRef.current = shuffled(autoQueueRef.current);
+        } else if (unshuffledRef.current) {
+            const left = new Set(queueRef.current.map(t => t.id));
+            const kept = unshuffledRef.current.filter(t => left.has(t.id));
+            const keptIds = new Set(kept.map(t => t.id));
+            syncQueue([...kept, ...queueRef.current.filter(t => !keptIds.has(t.id))]);
+            unshuffledRef.current = null;
+        }
+        syncUpNext();
+    }, [syncQueue, syncUpNext]);
 
     const onEnd = useCallback(async () => {
         // One end per song. A second "ended" from the old stream (sent while the
         // next song loads, or while the old stream is only held) must not skip
         // the song that just started; neither must one in its first seconds.
         if (endedRef.current || !streamUrl) return;
-        if (Date.now() - listenStartedAtRef.current < 4000) return;
+        // A stale end from the old stream arrives in the new song's first seconds,
+        // while it is still near its start; a seek to the end is a real end.
+        const nearEnd = duration > 0 && currentTimeRef.current >= duration - 3;
+        if (Date.now() - listenStartedAtRef.current < 4000 && !nearEnd) return;
         // ExoPlayer reports "not playing" at the end of a song; that is not the
         // listener pausing, so it must not stop the background keep-alive.
         endedRef.current = true;
@@ -1091,7 +1155,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
             try { if (onTrackEndRef.current()) return; } catch { /* fall through */ }
         }
         advanceToNextTrack();
-    }, [advanceToNextTrack, streamUrl]);
+    }, [advanceToNextTrack, streamUrl, duration]);
 
     // Metadata for the OS media session — drives the lock screen, notification-bar
     // controls, and iOS Control Center / Dynamic Island Now Playing card. imageUri must
