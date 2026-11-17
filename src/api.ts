@@ -660,11 +660,17 @@ async function searchTidalSection(parameter: 'a' | 'al' | 'p', key: 'artists' | 
 }
 
 /** App quality names → the stream server's Qobuz tiers. */
+/** Main artists from a Qobuz item ("Name, MainArtist, ... - Name2, MainArtist"), else its performer. */
+function qobuzArtists(item: any): string {
+    const main = String(item?.performers || '').split(' - ').map(p => p.split(', ')).filter(p => p.includes('MainArtist')).map(p => p[0]);
+    return main.length ? main.join(', ') : String(item?.performer?.name || item?.artist || '');
+}
+
 const QOBUZ_QUALITY: Record<string, string> = {
-    HI_RES_LOSSLESS: 'hi-res-24',
-    LOSSLESS: 'lossless',
-    HIGH: 'mp3',
-    LOW: 'mp3',
+    HI_RES_LOSSLESS: '27',
+    LOSSLESS: '6',
+    HIGH: '5',
+    LOW: '5',
 };
 
 /** App quality names → the values the Tidal manifest API actually accepts. */
@@ -1035,20 +1041,21 @@ export const API = {
 
         // The stream server (Qobuz addon API): a direct FLAC/MP3 file per track.
         if (typeof track !== 'number' && track.source === 'qobuz' && HIFI_API_URL) {
-            const tier = QOBUZ_QUALITY[normalizeAppQuality(quality)] ?? 'lossless';
-            const streamUrl = `${HIFI_API_URL}/stream/${encodeURIComponent(track.providerId || String(track.id))}?quality=${tier}`;
+            const tier = QOBUZ_QUALITY[normalizeAppQuality(quality)] ?? '6';
+            const streamUrl = `${HIFI_API_URL}/tracks/${encodeURIComponent(track.providerId || String(track.id))}/file-url?format_id=${tier}`;
             // The free server is sometimes slow to answer: one retry before giving up.
             let res = await fetchWithTimeout(streamUrl).catch(() => null);
             if (!res || !res.ok) res = await fetchWithTimeout(streamUrl, undefined, 20000);
             if (!res.ok) throw new Error(`Qobuz stream ${res.status}`);
             const data = objectRecord(await res.json());
             if (typeof data.url !== 'string' || !data.url) throw new Error('Qobuz stream had no URL');
-            const codec = String(data.codec || data.format || '').toUpperCase() || null;
-            const bitDepth = Number(data.bitDepth) || null;
+            const mime = String(data.mime_type || '');
+            const codec = mime.includes('flac') ? 'FLAC' : mime.includes('mpeg') ? 'MP3' : null;
+            const bitDepth = Number(data.bit_depth) || null;
             return {
                 url: data.url,
                 isDash: false,
-                format: { codec, sampleRate: Number(data.sampleRate) || null, bitDepth, bitrate: null },
+                format: { codec, sampleRate: Number(data.sampling_rate) ? Number(data.sampling_rate) * 1000 : null, bitDepth, bitrate: null },
                 resolvedQuality: codec === 'MP3' ? 'HIGH' : bitDepth && bitDepth >= 24 ? 'HI_RES_LOSSLESS' : 'LOSSLESS',
             };
         }
@@ -1187,17 +1194,17 @@ export const API = {
         const toTrack = (item: any): Track | null => item?.id && item?.title ? {
             id: Number(item.id) || stableNumericId(`qobuz:${item.id}`),
             providerId: String(item.id),
-            title: String(item.title),
+            title: String(item.version ? `${item.title} (${item.version})` : item.title),
             duration: Number(item.duration) || 0,
-            artist: { id: 0, name: String(item.artist || '') },
-            album: { id: 0, title: String(item.album || ''), cover: String(item.artworkURL || '') },
+            artist: { id: 0, name: qobuzArtists(item) },
+            album: { id: 0, title: String(item.album?.title || item.album || ''), cover: String(item.album?.image?.large || item.artworkURL || '') },
             isrc: item.isrc ? String(item.isrc) : undefined,
             source: 'qobuz',
         } : null;
         try {
             const query = `${source.title.replace(/\s*\([^)]*\)/g, '')} ${source.artist.split(',')[0]}`.trim();
-            const res = await fetchWithTimeout(`${HIFI_API_URL}/search?q=${encodeURIComponent(query)}&limit=15`, undefined, timeoutMs);
-            const found: Track[] = res.ok ? (objectRecord(await res.json()).tracks as any[] ?? []).map(toTrack).filter((t: Track | null): t is Track => Boolean(t)) : [];
+            const res = await fetchWithTimeout(`${HIFI_API_URL}/search/tracks?q=${encodeURIComponent(query)}&limit=15`, undefined, timeoutMs);
+            const found: Track[] = res.ok ? ((objectRecord(await res.json()).tracks as any)?.items as any[] ?? []).map(toTrack).filter((t: Track | null): t is Track => Boolean(t)) : [];
             const best = bestRecording({ title: source.title, artist: source.artist, duration: source.durationSec, album: source.album }, found)
                 ?? found.find(t => looseSameRecording({ title: source.title, artist: source.artist, duration: source.durationSec }, t, 3));
             if (best) return best;

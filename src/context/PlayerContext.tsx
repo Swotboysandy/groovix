@@ -409,7 +409,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         setVerifiedFormat(null);
         setIsBuffering(true);
         try {
-            const data = (await API.getFreeFallbackStream(track)) ?? (await youTubeStream(track));
+            const data = (await youTubeStream(track)) ?? (await API.getFreeFallbackStream(track));
             if (requestId !== streamRequestIdRef.current) return;
             if (!data) throw new Error('No matching free fallback is available');
             const url = await resolveStream(data, track.id);
