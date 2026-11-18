@@ -1,7 +1,8 @@
 import { API } from '../api';
 import type { Track } from '../types';
 import type { ImportedPlaylist, ImportedPlaylistTrack, PlaylistPlatform } from '../store/importedPlaylists';
-import { normalizeMusicText, sameRecording } from './musicMatching';
+import { bestRecording, looseSameRecording, recordingTitle, recordingVariant, sameRecording } from './musicMatching';
+import { searchMusic } from './ytmusic';
 import { mapConcurrent } from './asyncTools';
 
 type SourceTrack = { title: string; artist: string; duration?: number };
@@ -216,20 +217,36 @@ function platformFor(url: string): PlaylistPlatform {
     throw new Error('Paste a Spotify, YouTube Music, YouTube, Apple Music, JioSaavn, Deezer or TIDAL playlist link.');
 }
 
-const normalize = normalizeMusicText;
-
-function matchScore(source: SourceTrack, candidate: Track): number {
-    const title = normalize(source.title); const artist = normalize(source.artist);
-    const candidateTitle = normalize(candidate.title); const candidateArtist = normalize(candidate.artist.name);
-    let score = title === candidateTitle ? 10 : title.includes(candidateTitle) || candidateTitle.includes(title) ? 6 : 0;
-    if (artist === candidateArtist) score += 8;
-    else if (artist.includes(candidateArtist) || candidateArtist.includes(artist.split(' ')[0])) score += 4;
-    if (source.duration && candidate.duration && Math.abs(source.duration - candidate.duration) <= 4) score += 3;
-    return score;
+/** A single transliteration typo needs exact artist/version and near-identical length. */
+function importMatch(song: SourceTrack, candidates: Track[]): Track | undefined {
+    const exact = bestRecording(song, candidates);
+    if (exact) return exact;
+    const title = recordingTitle(song.title);
+    if (!/^[a-z ]{9,}$/.test(title) || !song.duration) return undefined;
+    return candidates.find(candidate => {
+        if (!candidate.duration || Math.abs(song.duration! - candidate.duration) > 2) return false;
+        const other = recordingTitle(candidate.title);
+        if (!/^[a-z ]{9,}$/.test(other) || Math.abs(title.length - other.length) > 1) return false;
+        let a = 0; let b = 0; let edits = 0;
+        while (a < title.length || b < other.length) {
+            if (title[a] === other[b]) { a += 1; b += 1; continue; }
+            if (++edits > 1) return false;
+            if (title.length >= other.length) a += 1;
+            if (other.length >= title.length) b += 1;
+        }
+        return recordingVariant(song.title) === recordingVariant(candidate.title)
+            && sameRecording({ ...song, title: candidate.title }, candidate);
+    });
 }
 
-function reliableMatch(source: SourceTrack, candidate: Track): boolean {
-    return sameRecording(source, candidate);
+/** Retry transient failures, without increasing the three-worker request bound. */
+async function searchWithRetry(search: () => Promise<Track[]>): Promise<Track[]> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try { return await search(); } catch {
+            if (!attempt) await new Promise<void>(resolve => setTimeout(resolve, 350));
+        }
+    }
+    return [];
 }
 
 async function resolveTracks(source: SourceTrack[], onProgress?: (done: number, total: number) => void): Promise<ImportedPlaylistTrack[]> {
@@ -237,26 +254,23 @@ async function resolveTracks(source: SourceTrack[], onProgress?: (done: number, 
     onProgress?.(0, source.length);
     return mapConcurrent(source, 3, async song => {
         let resolved: Track | undefined;
-        try {
-            // The lossless stream server first: it matches by title, artist and length.
-            // A lookup failure (server down) must not skip the catalogue search below.
-            const qobuz = await Promise.resolve(API.resolveQobuz?.({ title: song.title, artist: song.artist, durationSec: song.duration })).catch(() => null);
-            if (qobuz) {
-                completed += 1;
-                onProgress?.(completed, source.length);
-                return { ...song, resolved: qobuz };
-            }
-            let candidates = await API.search(`${song.title} ${song.artist}`);
-            let best = candidates.filter(candidate => reliableMatch(song, candidate)).sort((a, b) => matchScore(song, b) - matchScore(song, a))[0];
-            // Some catalog providers rank a long "title + all artists" query poorly.
-            // Retry with the source title, then rank locally using artist and duration.
-            if (!best) {
-                const titleCandidates = await API.search(song.title);
-                candidates = [...candidates, ...titleCandidates].filter((track, candidateIndex, all) => all.findIndex(item => item.id === track.id) === candidateIndex);
-                best = candidates.filter(candidate => reliableMatch(song, candidate)).sort((a, b) => matchScore(song, b) - matchScore(song, a))[0];
-            }
-            resolved = best;
-        } catch { /* Preserve an unmatched row instead of losing the entire playlist. */ }
+        // Each provider fails independently, so an outage cannot skip later fallbacks.
+        const qobuz = await Promise.resolve(API.resolveQobuz?.({ title: song.title, artist: song.artist, durationSec: song.duration })).catch(() => null);
+        if (qobuz && looseSameRecording(song, qobuz)) resolved = qobuz;
+        const title = recordingTitle(song.title);
+        const artists = song.artist.split(/,|;|\bfeat\.?\s|\bfeaturing\s/i).map(artist => artist.trim()).filter(Boolean);
+        const queries = [...new Set([`${song.title} ${song.artist}`, `${title} ${artists[0] || song.artist}`, title])];
+        for (const query of queries) {
+            if (resolved) break;
+            resolved = importMatch(song, await searchWithRetry(() => API.search(query)));
+        }
+        // The same Innertube search/parser as SearchScreen. Keep its negative id
+        // and ytVideoId: the existing player resolves these lazily at play time.
+        for (const query of queries) {
+            if (resolved) break;
+            const candidates = await searchWithRetry(async () => (await searchMusic(query, 'songs')).tracks);
+            resolved = importMatch(song, candidates);
+        }
         completed += 1;
         onProgress?.(completed, source.length);
         return { ...song, resolved };

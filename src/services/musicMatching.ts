@@ -8,6 +8,9 @@ export function normalizeMusicText(value = ''): string {
 export function recordingTitle(value: string): string {
     return normalizeMusicText(value
         .replace(/\([^)]*\bfrom\b[^)]*\)|\[[^\]]*\bfrom\b[^\]]*\]/gi, ' ')
+        .replace(/\s*[([](?:feat\.?|ft\.?|featuring)\s[^)\]]*[)\]]/gi, ' ')
+        .replace(/\s+\b(?:feat\.?|ft\.?|featuring)\s+.*$/gi, ' ')
+        .replace(/\s*[-\u2013]?\s*(?:[([])?(?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:[)\]])?\s*$/gi, ' ')
         .replace(/\b(official\s+(music\s+)?(video|audio)|lyric(s)?\s+video)\b/gi, ' '));
 }
 
@@ -23,6 +26,9 @@ export function sameRecording(source: Recording, candidate: Track): boolean {
     const title = recordingTitle(source.title);
     if (!title || title !== recordingTitle(candidate.title)) return false;
     if (recordingVariant(source.title) !== recordingVariant(candidate.title)) return false;
+    if (unwantedNonVocal(source.title, candidate)) return false;
+    if (ALTERNATE_VERSION.test(`${candidate.title} ${candidate.album?.title ?? ''}`)
+        && !ALTERNATE_VERSION.test(source.title)) return false;
     const credits = (value: string) => value.replace(/\s*-\s*Topic$/i, '')
         .split(/,|&|;|\bfeat\.?\s|\bfeaturing\s|\band\b/i).map(normalizeMusicText).filter(Boolean);
     const sourceCredits = credits(source.artist);
@@ -42,6 +48,8 @@ export function sameRecording(source: Recording, candidate: Track): boolean {
  */
 export function looseSameRecording(source: Recording, candidate: Track, toleranceSec = 6): boolean {
     if (unwantedNonVocal(source.title, candidate)) return false;
+    if (ALTERNATE_VERSION.test(`${candidate.title} ${candidate.album?.title ?? ''}`)
+        && !ALTERNATE_VERSION.test(source.title)) return false;
     if (sameRecording(source, candidate)) return true;
     const a = recordingTitle(source.title);
     const b = recordingTitle(candidate.title);
@@ -56,7 +64,7 @@ export function looseSameRecording(source: Recording, candidate: Track, toleranc
 }
 
 /** Instrumental and karaoke editions have no vocals: never a match for a vocal song. */
-const NON_VOCAL = /(instrumental|karaoke)/i;
+const NON_VOCAL = /\b(instrumental|karaoke)\b/i;
 function unwantedNonVocal(wanted: string, candidate: Track): boolean {
     return NON_VOCAL.test(`${candidate.title} ${candidate.album?.title ?? ''}`) && !NON_VOCAL.test(wanted);
 }

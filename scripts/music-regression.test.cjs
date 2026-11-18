@@ -701,3 +701,57 @@ test('a same-length instrumental or cover album never wins over the original son
     const picked = bestRecording({ title: 'Tum Se Hi', artist: 'Pritam, Mohit Chauhan, Irshad Kamil', duration: 322 }, [strings, original]);
     assert.equal(picked.id, 412830594);
 });
+
+test('import matching removes metadata noise and rejects wrong recordings', () => {
+    const { sameRecording, looseSameRecording } = loader()('src/services/musicMatching.ts');
+    assert.ok(sameRecording({ title: 'Hey Jude (Remastered 2015)', artist: 'The Beatles', duration: 431 }, track(1, 'Hey Jude', 'The Beatles', 431)));
+    assert.ok(sameRecording({ title: 'Song (From "Film") (feat. Guest)', artist: 'Singer, Guest', duration: 240 }, track(1, 'Song', 'Singer', 240)));
+    for (const candidate of [track(2, 'Song', 'Other'), track(3, 'Song Cover', 'Singer'), track(4, 'Song (Instrumental)', 'Singer'), track(5, 'Song', 'Singer', 280), { ...track(6, 'Song', 'Singer'), album: { title: 'Karaoke Hits' } }, { ...track(7, 'Song', 'Singer'), album: { title: 'Tribute Covers' } }]) {
+        assert.equal(sameRecording({ title: 'Song', artist: 'Singer', duration: 240 }, candidate), false);
+        assert.equal(looseSameRecording({ title: 'Song', artist: 'Singer', duration: 240 }, candidate), false);
+    }
+});
+
+test('import retries YouTube after catalogue outages and retains playable negative ids', async () => {
+    const calls = []; let attempts = 0;
+    const youtube = { ...track(-42, 'Song', 'Singer'), ytVideoId: 'video-id', source: undefined };
+    const { importPlaylistLink } = loader({
+        '../api': { API: { resolveQobuz: async () => { throw new Error('offline'); }, search: async () => { throw new Error('rate limited'); } } },
+        './ytmusic': { searchMusic: async (query, category) => {
+            calls.push([query, category]);
+            if (++attempts === 1) throw new Error('temporary timeout');
+            return { tracks: [track(-1, 'Song', 'Other'), { ...track(-2, 'Song', 'Singer'), album: { title: 'Karaoke' } }, youtube] };
+        } },
+    }, { fetch: async () => new Response('<script type="application/ld+json">' + JSON.stringify({ name: 'Import', track: [{ name: 'Song (From "Film")', byArtist: { name: 'Singer, Guest' } }] }) + '</script>') })('src/services/playlistImport.ts');
+    const result = await importPlaylistLink('https://music.apple.com/in/playlist/example/pl.123');
+    assert.equal(result.tracks[0].resolved, youtube);
+    assert.deepEqual(calls[0], calls[1]);
+    assert.equal(calls[0][1], 'songs');
+});
+
+test('import tries cleaned title and primary artist, preserving genuinely unmatched rows', async () => {
+    const queries = [];
+    const wanted = { ...track(-42, 'Song', 'Singer'), ytVideoId: 'wanted' };
+    const { importPlaylistLink } = loader({
+        '../api': { API: { search: async () => [] } },
+        './ytmusic': { searchMusic: async query => {
+            queries.push(query);
+            return { tracks: query === 'song Singer' ? [wanted] : [track(-1, 'Song', 'Other')] };
+        } },
+    }, { fetch: async () => new Response('<script type="application/ld+json">' + JSON.stringify({ name: 'Import', track: [{ name: 'Song (From "Film")', byArtist: { name: 'Singer, Guest' } }, { name: 'Missing', byArtist: { name: 'Singer' } }] }) + '</script>') })('src/services/playlistImport.ts');
+    const result = await importPlaylistLink('https://music.apple.com/in/playlist/example/pl.123');
+    assert.equal(result.tracks[0].resolved, wanted);
+    assert.equal(result.tracks[1].resolved, undefined);
+    assert.ok(queries.includes('song Singer'));
+});
+
+test('import accepts one-letter transliteration differences only with artist, version and tight duration evidence', async () => {
+    const source = ['Hey Ganraya', 'Vighnahartha', 'Wrong Artist', 'Wrong Length', 'Wrong Version'];
+    const hits = [track(-1, 'Hey Ganaraya', 'Singer', 293), track(-2, 'Vighnaharta', 'Singer', 293), track(-3, 'Wrong Artists', 'Other', 293), track(-4, 'Wrong Lengths', 'Singer', 300), { ...track(-5, 'Wrong Versions', 'Singer', 293), album: { title: 'Instrumental' } }];
+    const { importPlaylistLink } = loader({
+        '../api': { API: { search: async () => [] } },
+        './ytmusic': { searchMusic: async () => ({ tracks: hits }) },
+    }, { fetch: async () => new Response(JSON.stringify({ title: 'Import', list_count: 5, list: source.map(title => ({ title, more_info: { duration: 292, artistMap: { primary_artists: [{ name: 'Singer' }] } } })) })) })('src/services/playlistImport.ts');
+    const result = await importPlaylistLink('https://www.jiosaavn.com/featured/x/token');
+    assert.deepEqual(Array.from(result.tracks, t => t.resolved?.id), [-1, -2, undefined, undefined, undefined]);
+});
